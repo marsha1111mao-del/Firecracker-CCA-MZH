@@ -10,10 +10,10 @@ use std::cell::Cell;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{fence, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::{fmt, io, thread};
 
-use kvm_bindings::{KVM_SYSTEM_EVENT_RESET, KVM_SYSTEM_EVENT_SHUTDOWN};
+use kvm_bindings::{kvm_memory_attributes, KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_MEMORY_EXIT_FLAG_PRIVATE, KVM_SYSTEM_EVENT_RESET, KVM_SYSTEM_EVENT_SHUTDOWN};
 use kvm_ioctls::VcpuExit;
 #[cfg(feature = "gdb")]
 use kvm_ioctls::VcpuFd;
@@ -30,7 +30,7 @@ use crate::seccomp::{BpfProgram, BpfProgramRef};
 use crate::utils::signal::{register_signal_handler, sigrtmin, Killable};
 use crate::utils::sm::StateMachine;
 use crate::vstate::vm::Vm;
-use crate::FcExitCode;
+use crate::{FcExitCode, Vmm};
 
 /// Module with aarch64 vCPU implementation.
 #[cfg(target_arch = "aarch64")]
@@ -69,6 +69,8 @@ pub enum VcpuError {
     /// Error with gdb request sent
     #[cfg(feature = "gdb")]
     GdbRequest(GdbTargetError),
+    /// Faild to set memory attributes
+    SetMemoryAttributes(kvm_ioctls::Error),
 }
 
 /// Encapsulates configuration parameters for the guest vCPUS.
@@ -106,6 +108,9 @@ pub enum CopyKvmFdError {
 pub struct Vcpu {
     /// Access to kvm-arch specific functionality.
     pub kvm_vcpu: KvmVcpu,
+
+    /// Vmm associated with this vcpu.
+    vmm: Option<Arc<Mutex<Vmm>>>,
 
     /// File descriptor for vcpu to trigger exit event on vmm.
     exit_evt: EventFd,
@@ -219,6 +224,7 @@ impl Vcpu {
 
         Ok(Vcpu {
             exit_evt,
+            vmm: None,
             event_receiver,
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
@@ -227,6 +233,10 @@ impl Vcpu {
             gdb_event: None,
             kvm_vcpu,
         })
+    }
+
+    pub fn set_vmm(&mut self, vmm: Arc<Mutex<Vmm>>) {
+        self.vmm = Some(vmm);
     }
 
     /// Sets a MMIO bus for this vcpu.
@@ -523,7 +533,7 @@ impl Vcpu {
 
                 Ok(VcpuEmulation::Paused)
             }
-            emulation_result => handle_kvm_exit(&mut self.kvm_vcpu.peripherals, emulation_result),
+            emulation_result => handle_kvm_exit(&mut self.kvm_vcpu.peripherals, emulation_result, self.vmm.as_ref().unwrap().clone()),
         }
     }
 }
@@ -532,6 +542,7 @@ impl Vcpu {
 fn handle_kvm_exit(
     peripherals: &mut Peripherals,
     emulation_result: Result<VcpuExit, errno::Error>,
+    vmm: Arc<Mutex<Vmm>>,
 ) -> Result<VcpuEmulation, VcpuError> {
     match emulation_result {
         Ok(run) => match run {
@@ -572,6 +583,22 @@ fn handle_kvm_exit(
                     "{:?}",
                     VcpuExit::FailEntry(hardware_entry_failure_reason, cpu)
                 )))
+            }
+            VcpuExit::MemoryFault(flag, gpa, size) => {
+                // TODO: map or unmap memory region
+                METRICS.vcpu.failures.inc();
+                let set_mem_attributes_args = kvm_memory_attributes {
+                    address: gpa,
+                    size: size,
+                    attributes: if (flag & KVM_MEMORY_EXIT_FLAG_PRIVATE as u64) != 0 {
+                        KVM_MEMORY_ATTRIBUTE_PRIVATE as u64
+                    } else {
+                        0
+                    },
+                    ..Default::default()
+                };
+                vmm.lock().unwrap().vm.fd().set_memory_attributes(set_mem_attributes_args).map_err(VcpuError::SetMemoryAttributes)?;
+                Ok(VcpuEmulation::Handled)
             }
             VcpuExit::InternalError => {
                 // Failure from the Linux KVM subsystem rather than from the hardware.
@@ -794,16 +821,24 @@ pub(crate) mod tests {
 
     #[test]
     fn test_handle_kvm_exit() {
-        let (_, _, mut vcpu, _vm_mem) = setup_vcpu(0x1000);
-        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::Hlt));
+        let (_, vm, mut vcpu, _vm_mem) = setup_vcpu(0x1000);
+        let vmm = Arc::new(Mutex::new(Vmm::new(
+            vm.clone(),
+            get_empty_filters(),
+            None,
+            None,
+            None,
+        )));
+        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::Hlt), vmm);
         assert_eq!(res.unwrap(), VcpuEmulation::Stopped);
 
-        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::Shutdown));
+        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::Shutdown), vmm);
         assert_eq!(res.unwrap(), VcpuEmulation::Stopped);
 
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Ok(VcpuExit::FailEntry(0, 0)),
+            vmm,
         );
         assert_eq!(
             format!("{:?}", res.unwrap_err()),
@@ -813,7 +848,7 @@ pub(crate) mod tests {
             )
         );
 
-        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::InternalError));
+        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::InternalError), vmm);
         assert_eq!(
             format!("{:?}", res.unwrap_err()),
             format!(
@@ -825,18 +860,21 @@ pub(crate) mod tests {
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Ok(VcpuExit::SystemEvent(2, &[])),
+            vmm,
         );
         assert_eq!(res.unwrap(), VcpuEmulation::Stopped);
 
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Ok(VcpuExit::SystemEvent(1, &[])),
+            vmm,
         );
         assert_eq!(res.unwrap(), VcpuEmulation::Stopped);
 
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Ok(VcpuExit::SystemEvent(3, &[])),
+            vmm,
         );
         assert_eq!(
             format!("{:?}", res.unwrap_err()),
@@ -847,7 +885,7 @@ pub(crate) mod tests {
         );
 
         // Check what happens with an unhandled exit reason.
-        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::Unknown));
+        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::Unknown), vmm);
         assert_eq!(
             res.unwrap_err().to_string(),
             "Unexpected kvm exit received: Unknown".to_string()
@@ -856,12 +894,14 @@ pub(crate) mod tests {
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Err(errno::Error::new(libc::EAGAIN)),
+            vmm,
         );
         assert_eq!(res.unwrap(), VcpuEmulation::Handled);
 
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Err(errno::Error::new(libc::ENOSYS)),
+            vmm,
         );
         assert_eq!(
             format!("{:?}", res.unwrap_err()),
@@ -877,6 +917,7 @@ pub(crate) mod tests {
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Err(errno::Error::new(libc::EINVAL)),
+            vmm,
         );
         assert_eq!(
             format!("{:?}", res.unwrap_err()),
@@ -895,12 +936,14 @@ pub(crate) mod tests {
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Ok(VcpuExit::MmioRead(addr, &mut [0, 0, 0, 0])),
+            vmm,
         );
         assert_eq!(res.unwrap(), VcpuEmulation::Handled);
 
         let res = handle_kvm_exit(
             &mut vcpu.kvm_vcpu.peripherals,
             Ok(VcpuExit::MmioWrite(addr, &[0, 0, 0, 0])),
+            vmm,
         );
         assert_eq!(res.unwrap(), VcpuEmulation::Handled);
     }
@@ -1009,6 +1052,7 @@ pub(crate) mod tests {
                     smt: false,
                     cpu_config: crate::cpu_config::aarch64::CpuConfiguration::default(),
                 },
+                false,
                 &kvm.optional_capabilities(),
             )
             .expect("failed to configure vcpu");

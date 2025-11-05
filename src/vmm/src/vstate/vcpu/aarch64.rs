@@ -8,7 +8,7 @@
 use std::fmt::{Debug, Write};
 
 use kvm_bindings::{
-    kvm_mp_state, kvm_vcpu_init, KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2, KVM_ARM_VCPU_SVE,
+    kvm_mp_state, kvm_vcpu_init, KVM_ARM_VCPU_POWER_OFF, KVM_ARM_VCPU_PSCI_0_2, KVM_ARM_VCPU_SVE
 };
 use kvm_ioctls::*;
 use serde::{Deserialize, Serialize};
@@ -116,6 +116,7 @@ impl KvmVcpu {
         guest_mem: &GuestMemoryMmap,
         kernel_load_addr: GuestAddress,
         vcpu_config: &VcpuConfig,
+        is_realm: bool,
         optional_capabilities: &OptionalCapabilities,
     ) -> Result<(), KvmVcpuError> {
         for reg in vcpu_config.cpu_config.regs.iter() {
@@ -129,6 +130,7 @@ impl KvmVcpu {
             self.index,
             kernel_load_addr.raw_value(),
             guest_mem,
+            is_realm,
             optional_capabilities,
         )
         .map_err(KvmVcpuError::ConfigureRegisters)?;
@@ -352,6 +354,7 @@ mod tests {
             &vm_mem,
             GuestAddress(crate::arch::get_kernel_start()),
             &vcpu_config,
+            false,
             &optional_capabilities,
         )
         .unwrap();
@@ -362,6 +365,7 @@ mod tests {
             &vm_mem,
             GuestAddress(crate::arch::get_kernel_start()),
             &vcpu_config,
+            false,
             &optional_capabilities,
         );
         assert_eq!(

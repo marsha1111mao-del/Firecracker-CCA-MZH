@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::VmError;
 use crate::arch::aarch64::gic::GicState;
+use crate::vmm_config::machine_config::MachineConfig;
 use crate::Kvm;
 
 /// Structure representing the current architecture's understand of what a "virtual machine" is.
@@ -29,8 +30,8 @@ pub enum ArchVmError {
 
 impl ArchVm {
     /// Create a new `Vm` struct.
-    pub fn new(kvm: &Kvm) -> Result<ArchVm, VmError> {
-        let fd = Self::create_vm(kvm)?;
+    pub fn new(kvm: &Kvm, machine_config: MachineConfig) -> Result<ArchVm, VmError> {
+        let fd = Self::create_vm(kvm, machine_config)?;
         Ok(ArchVm {
             fd,
             irqchip_handle: None,

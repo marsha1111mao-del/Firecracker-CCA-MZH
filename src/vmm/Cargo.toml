@@ -22,10 +22,10 @@ displaydoc = "0.2.5"
 event-manager = "0.4.0"
 gdbstub = { version = "0.7.3", optional = true }
 gdbstub_arch = { version = "0.3.1", optional = true }
-kvm-bindings = { version = "0.11.0", features = ["fam-wrappers", "serde"] }
-kvm-ioctls = "0.20.0"
+kvm-bindings = { path = "../../../firecracker-deps/kvm-bindings", features = ["fam-wrappers", "serde"] }
+kvm-ioctls = { path = "../../../firecracker-deps/kvm-ioctls" }
 libc = "0.2.170"
-linux-loader = "0.13.0"
+linux-loader = { path = "../../../firecracker-deps/linux-loader" }
 log = { version = "0.4.26", features = ["std", "serde"] }
 log-instrument = { path = "../log-instrument", optional = true }
 memfd = "0.6.3"
@@ -41,7 +41,7 @@ userfaultfd = "0.8.1"
 utils = { path = "../utils" }
 vhost = { version = "0.13.0", features = ["vhost-user-frontend"] }
 vm-allocator = "0.1.0"
-vm-memory = { version = "0.16.1", features = ["backend-mmap", "backend-bitmap"] }
+vm-memory = { path = "../../../firecracker-deps/vm-memory", features = ["backend-mmap", "backend-bitmap"] }
 vm-superio = "0.8.0"
 vmm-sys-util = { version = "0.12.1", features = ["with-serde"] }
 zerocopy = { version = "0.8.20" }
@@ -59,6 +59,7 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 default = []
 tracing = ["log-instrument"]
 gdb = ["arrayvec", "gdbstub", "gdbstub_arch"]
+rme = []
 
 [[bench]]
 name = "cpu_templates"

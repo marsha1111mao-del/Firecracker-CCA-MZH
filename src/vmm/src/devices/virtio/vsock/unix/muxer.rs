@@ -32,10 +32,11 @@
 ///  mapping `RawFd`s to `EpollListener`s.
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
+use libc::VMADDR_CID_HOST;
 use log::{debug, error, info, warn};
 use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 
@@ -174,7 +175,7 @@ impl VsockChannel for VsockMuxer {
                     });
                 }
 
-                debug!("vsock muxer: RX pkt: {:?}", pkt.hdr);
+                // debug!("vsock muxer: RX pkt: {:?}", pkt.hdr);
                 return Ok(());
             }
         }
@@ -196,11 +197,11 @@ impl VsockChannel for VsockMuxer {
             peer_port: pkt.hdr.src_port(),
         };
 
-        debug!(
-            "vsock: muxer.send[rxq.len={}]: {:?}",
-            self.rxq.len(),
-            pkt.hdr
-        );
+        // debug!(
+        //     "vsock: muxer.send[rxq.len={}]: {:?}",
+        //     self.rxq.len(),
+        //     pkt.hdr
+        // );
 
         // If this packet has an unsupported type (!=stream), we must send back an RST.
         //
@@ -211,13 +212,13 @@ impl VsockChannel for VsockMuxer {
 
         // We don't know how to handle packets addressed to other CIDs. We only handle the host
         // part of the guest - host communication here.
-        if pkt.hdr.dst_cid() != uapi::VSOCK_HOST_CID {
-            info!(
-                "vsock: dropping guest packet for unknown CID: {:?}",
-                pkt.hdr
-            );
-            return Ok(());
-        }
+        // if pkt.hdr.dst_cid() != uapi::VSOCK_HOST_CID {
+        //     info!(
+        //         "vsock: dropping guest packet for unknown CID: {:?}",
+        //         pkt.hdr
+        //     );
+        //     return Ok(());
+        // }
 
         if !self.conn_map.contains_key(&conn_key) {
             // This packet can't be routed to any active connection (based on its src and dst
@@ -335,10 +336,10 @@ impl VsockMuxer {
 
     /// Handle/dispatch an epoll event to its listener.
     fn handle_event(&mut self, fd: RawFd, event_set: EventSet) {
-        debug!(
-            "vsock: muxer processing event: fd={}, evset={:?}",
-            fd, event_set
-        );
+        // debug!(
+        //     "vsock: muxer processing event: fd={}, evset={:?}",
+        //     fd, event_set
+        // );
 
         match self.listener_map.get_mut(&fd) {
             // This event needs to be forwarded to a `MuxerConnection` that is listening for
@@ -612,27 +613,69 @@ impl VsockMuxer {
     /// RST packet will be scheduled for delivery to the guest.
     fn handle_peer_request_pkt(&mut self, pkt: &VsockPacketTx) {
         let port_path = format!("{}_{}", self.host_sock_path, pkt.hdr.dst_port());
-
-        UnixStream::connect(port_path)
-            .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))
-            .map_err(VsockUnixBackendError::UnixConnect)
-            .and_then(|stream| {
-                self.add_connection(
-                    ConnMapKey {
-                        local_port: pkt.hdr.dst_port(),
-                        peer_port: pkt.hdr.src_port(),
-                    },
-                    MuxerConnection::new_peer_init(
-                        stream,
-                        uapi::VSOCK_HOST_CID,
-                        self.cid,
-                        pkt.hdr.dst_port(),
-                        pkt.hdr.src_port(),
-                        pkt.hdr.buf_alloc(),
-                    ),
-                )
-            })
+        let dst_cid = pkt.hdr.dst_cid() as u32;
+        if dst_cid == VMADDR_CID_HOST {
+            info!("peer request to VMADDR_CID_HOST\n");
+            UnixStream::connect(port_path)
+                .and_then(|stream| stream.set_nonblocking(true).map(|_| stream))
+                .map_err(VsockUnixBackendError::UnixConnect)
+                .and_then(|stream| {
+                    self.add_connection(
+                        ConnMapKey {
+                            local_port: pkt.hdr.dst_port(),
+                            peer_port: pkt.hdr.src_port(),
+                        },
+                        MuxerConnection::new_peer_init(
+                            stream,
+                            uapi::VSOCK_HOST_CID,
+                            self.cid,
+                            pkt.hdr.dst_port(),
+                            pkt.hdr.src_port(),
+                            pkt.hdr.buf_alloc(),
+                        ),
+                    )
+                })
+                .unwrap_or_else(|_| self.enq_rst(pkt.hdr.dst_port(), pkt.hdr.src_port()));
+        } else {
+            info!("peer request to {}\n", dst_cid);
+            // get a stream connect to dst_guest
+            // use stream instead of host stream to create a peer-init connection
+            let dst_vsock_path = format!("/tmp/v{}sock", pkt.hdr.dst_cid());
+            let command = format!("connect {}\n", pkt.hdr.dst_port());
+            let mut accept_buf = [0u8; 1024];
+            let mut stream = UnixStream::connect(dst_vsock_path)
+                .map_err(VsockUnixBackendError::UnixConnect)
+                .and_then(|mut stream| {
+                    stream
+                        .write_all(command.as_bytes())
+                        .map(|_| stream)
+                        .map_err(VsockUnixBackendError::UnixConnect)
+                })
+                .unwrap();
+            stream
+                .read(&mut accept_buf)
+                .expect("fail to get uds response");
+            stream
+                .set_nonblocking(true)
+                .map_err(VsockUnixBackendError::UnixConnect)
+                .unwrap_or_else(|_| self.enq_rst(pkt.hdr.dst_port(), pkt.hdr.src_port()));
+            //
+            self.add_connection(
+                ConnMapKey {
+                    local_port: pkt.hdr.dst_port(),
+                    peer_port: pkt.hdr.src_port(),
+                },
+                MuxerConnection::new_peer_init(
+                    stream,
+                    uapi::VSOCK_HOST_CID,
+                    self.cid,
+                    pkt.hdr.dst_port(),
+                    pkt.hdr.src_port(),
+                    pkt.hdr.buf_alloc(),
+                ),
+            )
             .unwrap_or_else(|_| self.enq_rst(pkt.hdr.dst_port(), pkt.hdr.src_port()));
+        }
     }
 
     /// Perform an action that might mutate a connection's state.

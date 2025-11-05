@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt::Debug;
-
+use log::info;
 use vm_fdt::{Error as VmFdtError, FdtWriter, FdtWriterNode};
 use vm_memory::GuestMemoryError;
 
@@ -92,6 +92,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     fdt_writer.property_u32("interrupt-parent", GIC_PHANDLE)?;
     create_cpu_nodes(&mut fdt_writer, &vcpu_mpidr)?;
     create_memory_node(&mut fdt_writer, guest_mem)?;
+    create_reserverd_memory_node(&mut fdt_writer, guest_mem)?;
     create_chosen_node(&mut fdt_writer, cmdline, initrd)?;
     create_gic_node(&mut fdt_writer, gic_device)?;
     create_timer_node(&mut fdt_writer)?;
@@ -228,14 +229,19 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
     // The reason we do this is that Linux does not allow remapping system memory. However, without
     // remap, kernel drivers cannot get virtual addresses to read data from device memory. Leaving
     // this memory region out allows Linux kernel modules to remap and thus read this region.
+    // info!("guest_mem.lastaddr :{:#x}\n",guest_mem.last_addr().raw_value());
     let mem_size = guest_mem.last_addr().raw_value()
         - super::layout::DRAM_MEM_START
         - super::layout::SYSTEM_MEM_SIZE
+        - super::layout::RESERVERD_MEM_SIZE
         + 1;
     let mem_reg_prop = &[
-        super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE,
+        super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE+ super::layout::RESERVERD_MEM_SIZE,
         mem_size,
     ];
+    assert!((super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE+ super::layout::RESERVERD_MEM_SIZE) % 0x20_0000 == 0, "memory_start must be 2MB-aligned");
+    assert!(&mem_size % 0x20_0000 == 0, "memory_size must be 2MB-aligned");
+    info!("Memory start:{:#x}\n Memory size:{:#x}\n",super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE+ super::layout::RESERVERD_MEM_SIZE,&mem_size);
     let mem = fdt.begin_node("memory@ram")?;
     fdt.property_string("device_type", "memory")?;
     fdt.property_array_u64("reg", mem_reg_prop)?;
@@ -243,6 +249,31 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
 
     Ok(())
 }
+
+fn create_reserverd_memory_node(fdt:&mut FdtWriter,guest_mem:&GuestMemoryMmap)->Result<(),FdtError>{
+    let reserved_mem_size= super::layout::RESERVERD_MEM_SIZE;
+    assert!(super::layout::RESERVERD_MEM_START % 0x20_0000 == 0, "reserved_start must be 2MB-aligned");
+    assert!(super::layout::RESERVERD_MEM_SIZE % 0x20_0000 == 0, "reserved_size must be 2MB-aligned");
+    let reserved_mem_reg_prop = &[
+        0x0,
+        super::layout::RESERVERD_MEM_START,
+        0x0,
+        reserved_mem_size,
+    ];
+    let reserved_mem=fdt.begin_node("reserved-memory")?;
+    fdt.property_u32("#address-cells", 2)?;
+    fdt.property_u32("#size-cells", 2)?;
+    fdt.property_null("ranges")?;
+    let reserved_region_name=format!("reserved_region@{:x}", super::layout::RESERVERD_MEM_START);
+    let reserved_region = fdt.begin_node(&reserved_region_name)?;
+    fdt.property_string("compatible", "shared-dma-pool")?;
+    fdt.property_array_u64("reg", reserved_mem_reg_prop)?;
+    fdt.property_null("no-map")?;
+    fdt.end_node(reserved_region)?;
+    fdt.end_node(reserved_mem)?;
+    Ok(())
+}
+
 
 fn create_chosen_node(
     fdt: &mut FdtWriter,
@@ -355,7 +386,8 @@ fn create_psci_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
     // Two methods available: hvc and smc.
     // As per documentation, PSCI calls between a guest and hypervisor may use the HVC conduit
     // instead of SMC. So, since we are using kvm, we need to use hvc.
-    fdt.property_string("method", "hvc")?;
+    
+    fdt.property_string("method", "smc")?;
     fdt.end_node(psci)?;
 
     Ok(())
@@ -424,7 +456,7 @@ fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug, S: std::hash::BuildH
 ) -> Result<(), FdtError> {
     // Create one temp Vec to store all virtio devices
     let mut ordered_virtio_device: Vec<&T> = Vec::new();
-
+    info!("dev_info:{:?}\n",&dev_info);
     for ((device_type, _device_id), info) in dev_info {
         match device_type {
             DeviceType::BootTimer => (), // since it's not a real device

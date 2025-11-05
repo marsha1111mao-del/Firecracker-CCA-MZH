@@ -1,8 +1,10 @@
 [build]
-target-dir = "build/cargo_target"
 rustflags = [
   "-Ccodegen-units=1",
 ]
+target-dir = "build/cargo_target"
 
 [net]
 git-fetch-with-cli = true
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"

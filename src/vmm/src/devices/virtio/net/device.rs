@@ -17,6 +17,7 @@ use vmm_sys_util::eventfd::EventFd;
 use super::NET_QUEUE_MAX_SIZE;
 use crate::devices::virtio::device::{DeviceState, IrqTrigger, IrqType, VirtioDevice};
 use crate::devices::virtio::gen::virtio_blk::VIRTIO_F_VERSION_1;
+use crate::devices::virtio::r#gen::virtio_net::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::gen::virtio_net::{
     virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4,
     VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4,
@@ -284,7 +285,8 @@ impl Net {
             | 1 << VIRTIO_NET_F_HOST_UFO
             | 1 << VIRTIO_F_VERSION_1
             | 1 << VIRTIO_NET_F_MRG_RXBUF
-            | 1 << VIRTIO_RING_F_EVENT_IDX;
+            | 1 << VIRTIO_RING_F_EVENT_IDX
+            | 1 << VIRTIO_F_ACCESS_PLATFORM;
 
         let mut config_space = ConfigSpace::default();
         if let Some(mac) = guest_mac {

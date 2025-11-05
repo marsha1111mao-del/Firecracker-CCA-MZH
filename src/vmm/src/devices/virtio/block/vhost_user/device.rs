@@ -15,6 +15,7 @@ use vmm_sys_util::eventfd::EventFd;
 use super::{VhostUserBlockError, NUM_QUEUES, QUEUE_SIZE};
 use crate::devices::virtio::block::CacheType;
 use crate::devices::virtio::device::{DeviceState, IrqTrigger, IrqType, VirtioDevice};
+use crate::devices::virtio::r#gen::virtio_blk::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::gen::virtio_blk::{
     VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO, VIRTIO_F_VERSION_1,
 };
@@ -40,7 +41,8 @@ const AVAILABLE_FEATURES: u64 = (1 << VIRTIO_F_VERSION_1)
     | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     // We always try to negotiate readonly with the backend.
     // If the backend is configured as readonly, we will accept it.
-    | (1 << VIRTIO_BLK_F_RO);
+    | (1 << VIRTIO_BLK_F_RO)
+    | (1u64 << VIRTIO_F_ACCESS_PLATFORM);
 
 /// Use this structure to set up the Block Device before booting the kernel.
 #[derive(Debug, PartialEq, Eq)]
@@ -340,8 +342,10 @@ impl<T: VhostUserHandleBackend + Send + 'static> VirtioDevice for VhostUserBlock
         let start_time = get_time_us(ClockType::Monotonic);
         // Setting features again, because now we negotiated them
         // with guest driver as well.
+        let mut masked_features=self.acked_features;
+        masked_features &= !(1u64 << VIRTIO_F_ACCESS_PLATFORM);
         self.vu_handle
-            .set_features(self.acked_features)
+            .set_features(masked_features)
             .and_then(|()| {
                 self.vu_handle.setup_backend(
                     &mem,
@@ -780,7 +784,7 @@ mod tests {
         file.set_len(region_size as u64).unwrap();
         let regions = vec![(GuestAddress(0x0), region_size)];
         let guest_memory =
-            GuestMemoryMmap::create(regions.into_iter(), libc::MAP_PRIVATE, Some(file), false)
+            GuestMemoryMmap::create(regions.into_iter(), libc::MAP_PRIVATE, Some(file), false, None)
                 .unwrap();
 
         // During actiavion of the device features, memory and queues should be set and activated.

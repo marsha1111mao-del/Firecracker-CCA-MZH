@@ -425,6 +425,8 @@ pub fn restore_from_snapshot(
             huge_pages: Some(microvm_state.vm_info.huge_pages),
             #[cfg(feature = "gdb")]
             gdb_socket_path: None,
+            #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+            realm_config: None,
         })
         .map_err(BuildMicrovmFromSnapshotError::VmUpdateConfig)?;
 

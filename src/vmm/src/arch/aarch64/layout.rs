@@ -82,3 +82,10 @@ pub const IRQ_BASE: u32 = 32;
 
 /// Below this address will reside the GIC, above this address will reside the MMIO devices.
 pub const MAPPED_IO_START: u64 = 1 << 30; // 1 GB
+
+///Start of reserved mem, after the system mem
+///be used to do rtt mapping for arm-cca
+pub const RESERVERD_MEM_START: u64 =SYSTEM_MEM_START+SYSTEM_MEM_SIZE;
+
+///Size fo reserve mem 
+pub const RESERVERD_MEM_SIZE:u64=0x140_0000;

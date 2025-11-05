@@ -157,6 +157,12 @@ pub fn configure_system(
         layout::SYSTEM_MEM_SIZE,
         E820_RESERVED,
     )?;
+    add_e820_entry(
+        &mut params,
+        layout::RESERVERD_MEM_START,
+        layout::RESERVERD_MEM_SIZE,
+        E820_RESERVED,
+    )?;
 
     let last_addr = guest_mem.last_addr();
     if last_addr < end_32bit_gap_start {

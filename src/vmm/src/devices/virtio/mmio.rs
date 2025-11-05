@@ -9,6 +9,8 @@ use std::fmt::Debug;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use vm_memory::GuestMemory;
+
 use crate::devices::virtio::device::{IrqType, VirtioDevice};
 use crate::devices::virtio::device_status;
 use crate::devices::virtio::queue::Queue;
@@ -57,6 +59,7 @@ pub struct MmioTransport {
     mem: GuestMemoryMmap,
     pub(crate) interrupt_status: Arc<AtomicU32>,
     pub is_vhost_user: bool,
+    pub is_pkvm: bool,
 }
 
 impl MmioTransport {
@@ -68,6 +71,9 @@ impl MmioTransport {
     ) -> MmioTransport {
         let interrupt_status = device.lock().expect("Poisoned lock").interrupt_status();
 
+        let is_pkvm = mem.iter().any(|region| {
+            (*region).guest_memfd_file_offset().is_some()
+        });
         MmioTransport {
             device,
             features_select: 0,
@@ -78,6 +84,7 @@ impl MmioTransport {
             mem,
             interrupt_status,
             is_vhost_user,
+            is_pkvm
         }
     }
 
@@ -250,6 +257,10 @@ impl MmioTransport {
                             .avail_features_by_page(self.features_select);
                         if self.features_select == 1 {
                             features |= 0x1; // enable support of VirtIO Version 1
+                            if self.is_pkvm {
+                                // pkvm devices support VIRTIO_F_ACCESS_PLATFORM
+                                features |= 0b10;
+                            }
                         }
                         features
                     }

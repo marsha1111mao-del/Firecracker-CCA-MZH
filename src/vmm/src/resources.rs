@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::cpu_config::templates::CustomCpuTemplate;
 use crate::device_manager::persist::SharedDeviceType;
 use crate::logger::info;
-use crate::mmds;
+use crate::{mmds, Vm};
 use crate::mmds::data_store::{Mmds, MmdsVersion};
 use crate::mmds::ns::MmdsNetworkStack;
 use crate::utils::net::ipv4addr::is_link_local_valid;
@@ -439,7 +439,10 @@ impl VmResources {
     ///
     /// If vhost-user-blk devices are in use, allocates memfd-backed shared memory, otherwise
     /// prefers anonymous memory for performance reasons.
-    pub fn allocate_guest_memory(&self) -> Result<GuestMemoryMmap, MemoryError> {
+    pub fn allocate_guest_memory(&self, vm: Option<&Vm> ) -> Result<GuestMemoryMmap, MemoryError> {
+        if self.machine_config.realm_config.is_some() && vm.is_some() {
+            return self.allocate_guest_memfd_memory(vm.unwrap());
+        }
         let vhost_user_device_used = self
             .block
             .devices
@@ -469,6 +472,15 @@ impl VmResources {
                 self.machine_config.huge_pages,
             )
         }
+    }
+
+    /// Allocates guest memory in a configuration most appropriate for these [`VmResources`].
+    /// used by arm cca Realms
+    pub fn allocate_guest_memfd_memory(&self, vm: &Vm) -> Result<GuestMemoryMmap, MemoryError> {
+        GuestMemoryMmap::guest_memfd_backed(
+            self.machine_config.mem_size_mib,
+            vm
+        )
     }
 }
 
@@ -1317,6 +1329,7 @@ mod tests {
 
     #[test]
     fn test_update_machine_config() {
+        use crate::vmm_config::machine_config::{MachineConfig, RealmConfig};
         let mut vm_resources = default_vm_resources();
         let mut aux_vm_config = MachineConfigUpdate {
             vcpu_count: Some(32),
@@ -1328,6 +1341,8 @@ mod tests {
             cpu_template: Some(StaticCpuTemplate::V1N1),
             track_dirty_pages: Some(false),
             huge_pages: Some(HugePageConfig::None),
+            #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+            realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
         };
 
         assert_ne!(

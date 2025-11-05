@@ -15,3 +15,4 @@
 )]
 
 pub const VIRTIO_RING_F_EVENT_IDX: u32 = 29;
+pub const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;

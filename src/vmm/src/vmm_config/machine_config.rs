@@ -3,6 +3,7 @@
 use std::fmt::Debug;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use base64::prelude::*;
 
 use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
 
@@ -89,6 +90,81 @@ impl From<HugePageConfig> for Option<memfd::HugetlbSize> {
     }
 }
 
+
+/// Personalization value for the realm.
+#[derive(Copy, Debug, PartialEq, Eq)]
+pub struct PersonalizationValue {
+    value: [u8; 64usize],
+}
+
+impl std::ops::Index<usize> for PersonalizationValue {
+    type Output = u8;
+    fn index(&self, index: usize) -> &u8 {
+        &self.value[index]
+    }
+}
+
+impl Default for PersonalizationValue {
+    fn default() -> Self {
+        Self {
+            value: [0; 64usize],
+        }
+    }
+}
+
+impl Serialize for PersonalizationValue {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        BASE64_STANDARD.encode(&self.value).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PersonalizationValue {
+    fn deserialize<D>(deserializer: D) -> Result<PersonalizationValue, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let value = BASE64_STANDARD.decode(value).map_err(serde::de::Error::custom)?;
+        let mut result = [0; 64usize];
+        result.copy_from_slice(&value);
+        Ok(PersonalizationValue { value: result })
+    }
+}
+
+impl Clone for PersonalizationValue {
+    fn clone(&self) -> Self {
+        Self { value: self.value }
+    }
+}
+
+impl PersonalizationValue {
+    fn new(value: [u8; 64usize]) -> Self {
+        Self { value }
+    }
+}
+
+/// Realm configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealmConfig {
+    /// Hash Algorithm
+    pub hash_algorithm: Option<String>,
+    /// Personalization Value
+    pub personalization_value: Option<PersonalizationValue>,
+}
+
+impl RealmConfig {
+    /// Creates a new `RealmConfig` object.
+    pub fn new(hash_algorithm: Option<String>, personalization_value: Option<[u8; 64]>) -> Self {
+        Self {
+            hash_algorithm,
+            personalization_value: personalization_value.map(PersonalizationValue::new),
+        }
+    }
+}
+
 /// Struct used in PUT `/machine-config` API call.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +195,9 @@ pub struct MachineConfig {
     #[cfg(feature = "gdb")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gdb_socket_path: Option<String>,
+    /// Whether the VM is a realm.
+    #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+    pub realm_config: Option<RealmConfig>,
 }
 
 fn is_none_or_custom_template(template: &Option<CpuTemplateType>) -> bool {
@@ -159,6 +238,8 @@ impl Default for MachineConfig {
             huge_pages: HugePageConfig::None,
             #[cfg(feature = "gdb")]
             gdb_socket_path: None,
+            #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+            realm_config: None,
         }
     }
 }
@@ -194,6 +275,10 @@ pub struct MachineConfigUpdate {
     #[cfg(feature = "gdb")]
     #[serde(default)]
     pub gdb_socket_path: Option<String>,
+    /// Whether the VM is a realm.
+    #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+    #[serde(default)]
+    pub realm_config: Option<RealmConfig>,
 }
 
 impl MachineConfigUpdate {
@@ -216,6 +301,8 @@ impl From<MachineConfig> for MachineConfigUpdate {
             huge_pages: Some(cfg.huge_pages),
             #[cfg(feature = "gdb")]
             gdb_socket_path: cfg.gdb_socket_path,
+            #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+            realm_config: cfg.realm_config,
         }
     }
 }
@@ -283,6 +370,8 @@ impl MachineConfig {
             huge_pages: page_config,
             #[cfg(feature = "gdb")]
             gdb_socket_path: update.gdb_socket_path.clone(),
+            #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+            realm_config: update.realm_config.clone(),
         })
     }
 }
@@ -290,7 +379,7 @@ impl MachineConfig {
 #[cfg(test)]
 mod tests {
     use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
-    use crate::vmm_config::machine_config::MachineConfig;
+    use crate::vmm_config::machine_config::{MachineConfig, RealmConfig};
 
     // Ensure the special (de)serialization logic for the cpu_template field works:
     // only static cpu templates can be specified via the machine-config endpoint, but
@@ -336,5 +425,17 @@ mod tests {
         let deserialized = serde_json::from_str::<MachineConfig>(&serialized).unwrap();
 
         assert!(deserialized.cpu_template.is_none());
+
+        #[cfg(all(target_arch = "aarch64", feature = "rme"))]
+        {
+            let mconfig = MachineConfig {
+                realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
+                ..Default::default()
+            };
+            let serialized = serde_json::to_string(&mconfig).unwrap();
+            let deserialized = serde_json::from_str::<MachineConfig>(&serialized).unwrap();
+
+            assert_eq!(deserialized.realm_config, Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))));
+        }
     }
 }

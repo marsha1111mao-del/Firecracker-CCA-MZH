@@ -9,12 +9,15 @@ use vm_memory::GuestAddress;
 use vmm_sys_util::tempdir::TempDir;
 
 use crate::builder::build_microvm_for_boot;
+use crate::devices::virtio::block::CacheType;
 use crate::resources::VmResources;
 use crate::seccomp::get_empty_filters;
 use crate::test_utils::mock_resources::{MockBootSourceConfig, MockVmConfig, MockVmResources};
 use crate::vmm_config::boot_source::BootSourceConfig;
+use crate::vmm_config::drive::BlockDeviceConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
-use crate::vmm_config::machine_config::HugePageConfig;
+use crate::vmm_config::machine_config::{HugePageConfig, MachineConfig, RealmConfig};
+use crate::vmm_config::net::NetworkInterfaceConfig;
 use crate::vstate::memory::{GuestMemoryExtension, GuestMemoryMmap};
 use crate::{EventManager, Vmm};
 
@@ -54,20 +57,54 @@ pub fn create_vmm(
 
     let boot_source_cfg = MockBootSourceConfig::new().with_default_boot_args();
     #[cfg(target_arch = "aarch64")]
-    let boot_source_cfg: BootSourceConfig = boot_source_cfg.into();
+    let mut boot_source_cfg: BootSourceConfig = boot_source_cfg.into();
+    boot_source_cfg.kernel_image_path = "/mnt/linux/arch/arm64/boot/Image".to_string();
+    // boot_source_cfg.kernel_image_path = "/mnt/linux/vmlinux".to_string();
+    boot_source_cfg.boot_args = Some("console=ttyS0 reboot=k panic=1 pci=off".to_string());
     #[cfg(target_arch = "x86_64")]
     let boot_source_cfg: BootSourceConfig = match _kernel_image {
         Some(kernel) => boot_source_cfg.with_kernel(kernel).into(),
         None => boot_source_cfg.into(),
     };
-    let mock_vm_res = MockVmResources::new().with_boot_source(boot_source_cfg);
-    let resources: VmResources = if is_diff {
+    let vm_config = MachineConfig {
+        mem_size_mib: 2048,
+        vcpu_count: 1,
+        realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
+        ..Default::default()
+    };
+    let mock_vm_res = MockVmResources::new().with_boot_source(boot_source_cfg).with_vm_config(vm_config);
+    let mut resources: VmResources = if is_diff {
         mock_vm_res
             .with_vm_config(MockVmConfig::new().with_dirty_page_tracking().into())
             .into()
     } else {
         mock_vm_res.into()
     };
+    let block_device_config = BlockDeviceConfig {
+        drive_id: String::from("1"),
+        partuuid: None,
+        is_root_device: true,
+        cache_type: CacheType::Unsafe,
+
+        is_read_only: Some(false),
+        path_on_host: Some("/mnt/ubuntu-24.04.ext4".to_string()),
+        rate_limiter: None,
+        file_engine_type: None,
+
+        socket: None,
+    };
+    resources.set_block_device(block_device_config).unwrap();
+
+    let id_1 = "id_0";
+    let host_dev_name_1 = "tap0";
+    let network_config = NetworkInterfaceConfig {
+        iface_id: String::from(id_1),
+        host_dev_name: String::from(host_dev_name_1),
+        guest_mac: None,
+        rx_rate_limiter: None,
+        tx_rate_limiter: None,
+    };
+    resources.build_net_device(network_config).unwrap();
 
     let vmm = build_microvm_for_boot(
         &InstanceInfo::default(),

@@ -10,6 +10,11 @@ use std::fmt::Debug;
 use std::io;
 use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
 
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use log::{error, warn};
@@ -17,7 +22,6 @@ use serde::Serialize;
 use vm_superio::serial::{Error as SerialError, SerialEvents};
 use vm_superio::{Serial, Trigger};
 use vmm_sys_util::epoll::EventSet;
-
 use crate::devices::legacy::EventFdTrigger;
 use crate::logger::{IncMetric, SharedIncMetric};
 
@@ -126,7 +130,7 @@ impl SerialEvents for SerialEventsWrapper {
 #[derive(Debug)]
 pub enum SerialOut {
     Sink(std::io::Sink),
-    Stdout(std::io::Stdout),
+    Stdout(BufferedStdout),
 }
 impl std::io::Write for SerialOut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -142,7 +146,103 @@ impl std::io::Write for SerialOut {
         }
     }
 }
+/// 一个带独立I/O线程的缓冲写入器，模拟QEMU的Chardev行为。
+#[derive(Debug)]
+pub struct BufferedStdout {
+    buffer: Arc<Mutex<Vec<u8>>>,
+    // 用于通知I/O线程退出的原子标志
+    shutdown: Arc<AtomicBool>,
+    // I/O线程的句柄，用于在Drop时等待其结束
+    io_thread_handle: Option<JoinHandle<()>>,
+}
 
+impl BufferedStdout {
+    /// 创建一个新的 BufferedStdout 实例。
+    pub fn new(stdout :std::io::Stdout) -> Self {
+        let capacity = 8192;
+        let flush_interval = Duration::from_millis(20);
+        let buffer = Arc::new(Mutex::new(Vec::with_capacity(capacity)));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let buffer_clone = Arc::clone(&buffer);
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        // 启动后台I/O线程
+        let io_thread_handle = thread::spawn(move || {
+            
+            // 只要 shutdown 标志为 false，就持续运行
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                // 等待指定间隔
+                thread::sleep(flush_interval);
+
+                let mut data_to_write = Vec::new();
+                {
+                    // 锁定缓冲区，与 VMM 的写入线程互斥
+                    let mut buf_guard = buffer_clone.lock().unwrap();
+                    // 如果缓冲区有数据，交换出来，尽快释放锁
+                    if !buf_guard.is_empty() {
+                        std::mem::swap(&mut data_to_write, &mut *buf_guard);
+                    }
+                } // 锁在这里被释放
+
+                // 如果有数据，就执行实际的I/O操作
+                if !data_to_write.is_empty() {
+                    let mut handle = stdout.lock();
+                    handle.write_all(&data_to_write).unwrap_or_else(|e| {
+                        eprintln!("Error writing to stdout: {}", e);
+                    });
+                    handle.flush().unwrap_or_else(|e| {
+                        eprintln!("Error flushing stdout: {}", e);
+                    });
+                }
+            }
+        });
+
+        Self {
+            buffer,
+            shutdown,
+            io_thread_handle: Some(io_thread_handle),
+        }
+    }
+}
+
+/// 实现 Write trait
+/// VMM 线程会调用这个实现。
+impl Write for BufferedStdout {
+    /// 将数据写入内存缓冲区，并立即返回。
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // 锁定并拷贝数据，这是一个纯内存操作，非常快。
+        self.buffer.lock().unwrap().extend_from_slice(buf);
+        // 告诉调用者所有数据都已被“写入”。
+        Ok(buf.len())
+    }
+
+    /// flush 在这里可以是一个空操作，因为后台线程会自动处理。
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// 实现 Drop trait 以实现优雅停机
+impl Drop for BufferedStdout {
+    fn drop(&mut self) {
+        // 1. 通知I/O线程退出循环
+        self.shutdown.store(true, Ordering::Relaxed);
+
+        // 2. 等待I/O线程处理完最后的任务并退出
+        if let Some(handle) = self.io_thread_handle.take() {
+            handle.join().expect("I/O thread panicked");
+        }
+        
+        // 3. (可选但推荐) 在线程退出后，再做一次最终的刷新，
+        //    防止有数据在最后一次循环检查和线程退出之间写入。
+        let final_data = self.buffer.lock().unwrap();
+        if !final_data.is_empty() {
+             io::stdout().lock().write_all(&final_data).ok();
+             io::stdout().lock().flush().ok();
+        }
+    }
+}
 /// Wrapper over the imported serial device.
 #[derive(Debug)]
 pub struct SerialWrapper<T: Trigger, EV: SerialEvents, I: Read + AsRawFd + Send> {

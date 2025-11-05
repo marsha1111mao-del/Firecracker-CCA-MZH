@@ -79,17 +79,19 @@ pub fn setup_boot_regs(
     cpu_id: u8,
     boot_ip: u64,
     mem: &GuestMemoryMmap,
+    is_realm: bool,
     optional_capabilities: &OptionalCapabilities,
 ) -> Result<(), VcpuError> {
     let kreg_off = offset_of!(kvm_regs, regs);
 
     // Get the register index of the PSTATE (Processor State) register.
-    let pstate = offset_of!(user_pt_regs, pstate) + kreg_off;
-    let id = arm64_core_reg_id!(KVM_REG_SIZE_U64, pstate);
-    vcpufd
-        .set_one_reg(id, &PSTATE_FAULT_BITS_64.to_le_bytes())
-        .map_err(|err| VcpuError::SetOneReg(id, err))?;
-
+    if !is_realm {
+        let pstate = offset_of!(user_pt_regs, pstate) + kreg_off;
+        let id = arm64_core_reg_id!(KVM_REG_SIZE_U64, pstate);
+        vcpufd
+            .set_one_reg(id, &PSTATE_FAULT_BITS_64.to_le_bytes())
+            .map_err(|err| VcpuError::SetOneReg(id, err))?;
+    }
     // Other vCPUs are powered off initially awaiting PSCI wakeup.
     if cpu_id == 0 {
         // Setting the PC (Processor Counter) to the current program address (kernel address).
@@ -120,7 +122,7 @@ pub fn setup_boot_regs(
         // https://lore.kernel.org/all/20230330174800.2677007-1-maz@kernel.org/
         // Note: the value observed by the guest will still be above 0, because there is a delta
         // time between this resetting and first call to KVM_RUN.
-        if optional_capabilities.counter_offset {
+        if !is_realm && optional_capabilities.counter_offset {
             vcpufd
                 .set_one_reg(KVM_REG_ARM_PTIMER_CNT, &[0; 8])
                 .map_err(|err| VcpuError::SetOneReg(id, err))?;
@@ -247,7 +249,7 @@ mod tests {
         let mem = arch_mem(layout::FDT_MAX_SIZE + 0x1000);
         let optional_capabilities = kvm.optional_capabilities();
 
-        let res = setup_boot_regs(&vcpu, 0, 0x0, &mem, &optional_capabilities);
+        let res = setup_boot_regs(&vcpu, 0, 0x0, &mem, false, &optional_capabilities);
         assert!(matches!(
             res.unwrap_err(),
             VcpuError::SetOneReg(0x6030000000100042, _)
@@ -257,7 +259,7 @@ mod tests {
         vm.get_preferred_target(&mut kvi).unwrap();
         vcpu.vcpu_init(&kvi).unwrap();
 
-        setup_boot_regs(&vcpu, 0, 0x0, &mem, &optional_capabilities).unwrap();
+        setup_boot_regs(&vcpu, 0, 0x0, &mem, false, &optional_capabilities).unwrap();
 
         // Check that the register is reset on compatible kernels.
         // Because there is a delta in time between we reset the register and time we

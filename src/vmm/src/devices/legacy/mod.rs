@@ -10,7 +10,6 @@ mod i8042;
 #[cfg(target_arch = "aarch64")]
 pub mod rtc_pl031;
 pub mod serial;
-
 use std::io;
 use std::ops::Deref;
 

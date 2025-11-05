@@ -24,7 +24,9 @@ use vmm_sys_util::errno;
 use crate::arch::arch_memory_regions;
 use crate::utils::{get_page_size, u64_to_usize};
 use crate::vmm_config::machine_config::HugePageConfig;
-use crate::DirtyBitmap;
+use crate::{DirtyBitmap, Vm};
+
+use super::vm::VmError;
 
 /// Type of GuestMemoryMmap.
 pub type GuestMemoryMmap = vm_memory::GuestMemoryMmap<Option<AtomicBitmap>>;
@@ -46,6 +48,8 @@ pub enum MemoryError {
     VmMemoryError(VmMemoryError),
     /// Cannot create memfd: {0}
     Memfd(memfd::Error),
+    /// Cannot create guest memfd: {0}
+    GuestMemfd(VmError),
     /// Cannot resize memfd file: {0}
     MemfdSetLen(std::io::Error),
     /// Total sum of memory regions exceeds largest possible file offset
@@ -63,6 +67,7 @@ where
         mmap_flags: libc::c_int,
         file: Option<File>,
         track_dirty_pages: bool,
+        guest_memfd_file: Option<File>,
     ) -> Result<Self, MemoryError>;
 
     /// Creates a GuestMemoryMmap with `size` in MiB backed by a memfd.
@@ -79,6 +84,24 @@ where
             libc::MAP_SHARED | huge_pages.mmap_flags(),
             Some(memfd_file),
             track_dirty_pages,
+            None,
+        )
+    }
+
+    /// Creates a GuestMemoryMmap with `size` in MiB backed by a guest memfd.
+    fn guest_memfd_backed(
+        mem_size_mib: usize,
+        vm: &Vm
+    ) -> Result<Self, MemoryError> {
+        let guest_memfd_file = vm.create_guest_memfd(mem_size_mib).map_err(|e| MemoryError::GuestMemfd(e))?;
+        let regions = arch_memory_regions(mem_size_mib << 20).into_iter();
+
+        Self::create(
+            regions,
+            libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+            None,
+            false,
+            Some(guest_memfd_file),
         )
     }
 
@@ -93,6 +116,7 @@ where
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | huge_pages.mmap_flags(),
             None,
             track_dirty_pages,
+            None
         )
     }
 
@@ -108,6 +132,7 @@ where
             libc::MAP_PRIVATE,
             Some(file),
             track_dirty_pages,
+            None
         )
     }
 
@@ -168,9 +193,11 @@ impl GuestMemoryExtension for GuestMemoryMmap {
         mmap_flags: c_int,
         file: Option<File>,
         track_dirty_pages: bool,
+        guest_memfd_file: Option<File>,
     ) -> Result<Self, MemoryError> {
         let mut offset = 0;
         let file = file.map(Arc::new);
+        let guest_memfd_file = guest_memfd_file.map(Arc::new);
         let regions = regions
             .map(|(start, size)| {
                 let mut builder = MmapRegionBuilder::new_with_bitmap(
@@ -184,6 +211,12 @@ impl GuestMemoryExtension for GuestMemoryMmap {
                     let file_offset = FileOffset::from_arc(Arc::clone(file), offset);
 
                     builder = builder.with_file_offset(file_offset);
+                }
+
+                if let Some(ref guest_memfd_file) = guest_memfd_file {
+                    let file_offset = FileOffset::from_arc(Arc::clone(guest_memfd_file), offset);
+
+                    builder = builder.with_guest_memfd_offset(file_offset);
                 }
 
                 offset = match offset.checked_add(size as u64) {

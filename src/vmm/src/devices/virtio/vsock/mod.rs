@@ -103,6 +103,8 @@ mod defs {
         pub const VSOCK_TYPE_STREAM: u16 = 1;
 
         pub const VSOCK_HOST_CID: u64 = 2;
+
+        pub const VIRTIO_F_ACCESS_PLATFORM: u32 = 33;
     }
 }
 

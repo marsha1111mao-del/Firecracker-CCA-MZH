@@ -68,6 +68,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
     vmgenid: &Option<VmGenId>,
     initrd: &Option<super::InitrdConfig>,
 ) -> Result<(), ConfigurationError> {
+    println!("create_fdt");
     let fdt = fdt::create_fdt(
         guest_mem,
         vcpu_mpidr,
@@ -86,7 +87,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
 
 /// Returns the memory address where the kernel could be loaded.
 pub fn get_kernel_start() -> u64 {
-    layout::SYSTEM_MEM_START + layout::SYSTEM_MEM_SIZE
+    layout::SYSTEM_MEM_START + layout::SYSTEM_MEM_SIZE+layout::RESERVERD_MEM_SIZE
 }
 
 /// Returns the memory address where the initrd could be loaded.
@@ -109,7 +110,7 @@ pub fn initrd_load_addr(
 }
 
 // Auxiliary function to get the address where the device tree blob is loaded.
-fn get_fdt_addr(mem: &GuestMemoryMmap) -> u64 {
+pub fn get_fdt_addr(mem: &GuestMemoryMmap) -> u64 {
     // If the memory allocated is smaller than the size allocated for the FDT,
     // we return the start of the DRAM so that
     // we allow the code to try and load the FDT.

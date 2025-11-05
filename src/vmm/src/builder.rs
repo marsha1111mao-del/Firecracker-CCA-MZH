@@ -10,7 +10,8 @@ use std::io::{self, Seek, SeekFrom};
 #[cfg(feature = "gdb")]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-
+use std::io::{Cursor, Read};
+use kvm_bindings::{kvm_cap_arm_rme_config_item, kvm_cap_arm_rme_init_ipa_args, kvm_cap_arm_rme_populate_realm_args, kvm_enable_cap, kvm_memory_attributes, KVM_ARM_VCPU_REC, KVM_CAP_ARM_RME, KVM_CAP_ARM_RME_ACTIVATE_REALM, KVM_CAP_ARM_RME_CFG_HASH_ALGO, KVM_CAP_ARM_RME_CFG_RPV, KVM_CAP_ARM_RME_CONFIG_REALM, KVM_CAP_ARM_RME_CREATE_RD, KVM_CAP_ARM_RME_INIT_IPA_REALM, KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA256, KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA512, KVM_CAP_ARM_RME_POPULATE_REALM, KVM_MEMORY_ATTRIBUTE_PRIVATE};
 use event_manager::{MutEventSubscriber, SubscriberOps};
 use libc::EFD_NONBLOCK;
 use linux_loader::cmdline::Cmdline as LoaderKernelCmdline;
@@ -21,14 +22,16 @@ use linux_loader::loader::pe::PE as Loader;
 use linux_loader::loader::KernelLoader;
 use userfaultfd::Uffd;
 use utils::time::TimestampUs;
-use vm_memory::ReadVolatile;
+use vm_memory::{Address, GuestMemoryRegion, GuestUsize, ReadVolatile};
 #[cfg(target_arch = "aarch64")]
 use vm_superio::Rtc;
 use vm_superio::Serial;
+use vmm_sys_util::errno;
 use vmm_sys_util::eventfd::EventFd;
 
 #[cfg(target_arch = "x86_64")]
 use crate::acpi;
+use crate::arch::aarch64::{get_fdt_addr, layout};
 use crate::arch::InitrdConfig;
 #[cfg(target_arch = "aarch64")]
 use crate::construct_kvm_mpidrs;
@@ -67,7 +70,7 @@ use crate::snapshot::Persist;
 use crate::utils::u64_to_usize;
 use crate::vmm_config::boot_source::BootConfig;
 use crate::vmm_config::instance_info::InstanceInfo;
-use crate::vmm_config::machine_config::{MachineConfig, MachineConfigError};
+use crate::vmm_config::machine_config::{self, MachineConfig, MachineConfigError, RealmConfig};
 use crate::vstate::kvm::Kvm;
 use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 use crate::vstate::vcpu::{Vcpu, VcpuConfig, VcpuError};
@@ -130,6 +133,20 @@ pub enum StartMicrovmError {
     CreateEntropyDevice(crate::devices::virtio::rng::EntropyError),
     /// Failed to allocate guest resource: {0}
     AllocateResources(#[from] vm_allocator::Error),
+    /// Failed to config hash algorithm: {0}
+    ConfigHashAlgo(errno::Error),
+    /// Failed to create a realm descriptor: {0}
+    CreateRealmDescriptor(errno::Error),
+    /// Failed to init ipa realm: {0}
+    InitIpaRealm(errno::Error),
+    /// Failed to populate realm: {0}
+    PopulateRealm(errno::Error),
+    /// Failed to populate realm: {0}
+    SetMemoryAttributes(errno::Error),
+    /// Failed to finalized rec: {0}
+    FinalizeRec(kvm_ioctls::Error),
+    /// Failed to activate realm: {0}
+    ActivateRealm(errno::Error),
     /// Error configuring ACPI: {0}
     #[cfg(target_arch = "x86_64")]
     Acpi(#[from] crate::acpi::AcpiError),
@@ -156,24 +173,10 @@ fn create_vmm_and_vcpus(
     guest_memory: GuestMemoryMmap,
     uffd: Option<Uffd>,
     vcpu_count: u8,
-    kvm_capabilities: Vec<KvmCapability>,
+    kvm: Kvm,
+    mut vm: Vm,
 ) -> Result<(Vmm, Vec<Vcpu>), StartMicrovmError> {
     use self::StartMicrovmError::*;
-
-    let kvm = Kvm::new(kvm_capabilities)
-        .map_err(VmmError::Kvm)
-        .map_err(StartMicrovmError::Internal)?;
-    // Set up Kvm Vm and register memory regions.
-    // Build custom CPU config if a custom template is provided.
-    let mut vm = Vm::new(&kvm)
-        .map_err(VmmError::Vm)
-        .map_err(StartMicrovmError::Internal)?;
-    kvm.check_memory(&guest_memory)
-        .map_err(VmmError::Kvm)
-        .map_err(StartMicrovmError::Internal)?;
-    vm.memory_init(&guest_memory)
-        .map_err(VmmError::Vm)
-        .map_err(StartMicrovmError::Internal)?;
 
     let resource_allocator = ResourceAllocator::new()?;
 
@@ -252,12 +255,6 @@ pub fn build_microvm_for_boot(
         .as_ref()
         .ok_or(MissingKernelConfig)?;
 
-    let guest_memory = vm_resources
-        .allocate_guest_memory()
-        .map_err(StartMicrovmError::GuestMemory)?;
-
-    let entry_addr = load_kernel(boot_config, &guest_memory)?;
-    let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
     // Clone the command-line so that a failed boot doesn't pollute the original.
     #[allow(unused_mut)]
     let mut boot_cmdline = boot_config.cmdline.clone();
@@ -267,13 +264,49 @@ pub fn build_microvm_for_boot(
         .cpu_template
         .get_cpu_template()?;
 
+    let is_realm = vm_resources.machine_config.realm_config.is_some();
+    let kvm = Kvm::new(cpu_template.kvm_capabilities.clone())
+        .map_err(VmmError::Kvm)
+        .map_err(StartMicrovmError::Internal)?;
+    // Set up Kvm Vm and register memory regions.
+    // Build custom CPU config if a custom template is provided.
+    let vm = Vm::new(&kvm, vm_resources.machine_config.clone())
+        .map_err(VmmError::Vm)
+        .map_err(StartMicrovmError::Internal)?;
+    
+    let guest_memory = vm_resources
+        .allocate_guest_memory(Some(&vm))
+        .map_err(StartMicrovmError::GuestMemory)?;
+
+    let mut mem_need_populate = vec![];
+
+    let (entry_addr, kernel_end) = load_kernel(boot_config, &guest_memory)?;
+    println!("entry_addr: {:?}", entry_addr);
+    mem_need_populate.push((entry_addr, kernel_end - entry_addr.raw_value()));
+    let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
+    if initrd.is_some() {
+        mem_need_populate.push((initrd.as_ref().unwrap().address, initrd.as_ref().unwrap().size as u64));
+    }
+    mem_need_populate.push((GuestAddress(get_fdt_addr(&guest_memory)), layout::FDT_MAX_SIZE as u64));
+    // add RESERVED MEM to populate
+    let (reserved_addr,reserved_size)=load_reserved(&guest_memory)?;
+    //
+    mem_need_populate.push((reserved_addr,reserved_size));
+    kvm.check_memory(&guest_memory)
+        .map_err(VmmError::Kvm)
+        .map_err(StartMicrovmError::Internal)?;
+    vm.memory_init(&guest_memory)
+        .map_err(VmmError::Vm)
+        .map_err(StartMicrovmError::Internal)?;
+
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
         event_manager,
         guest_memory,
         None,
         vm_resources.machine_config.vcpu_count,
-        cpu_template.kvm_capabilities.clone(),
+        kvm,
+        vm,
     )?;
 
     #[cfg(feature = "gdb")]
@@ -321,10 +354,11 @@ pub fn build_microvm_for_boot(
     }
 
     #[cfg(target_arch = "aarch64")]
-    attach_legacy_devices_aarch64(event_manager, &mut vmm, &mut boot_cmdline).map_err(Internal)?;
+    attach_legacy_devices_aarch64(event_manager, &mut vmm, &mut boot_cmdline, is_realm).map_err(Internal)?;
 
     attach_vmgenid_device(&mut vmm)?;
 
+    println!("boot_cmdline: {:?}", boot_cmdline);
     configure_system_for_boot(
         &mut vmm,
         vcpus.as_mut(),
@@ -335,6 +369,18 @@ pub fn build_microvm_for_boot(
         boot_cmdline,
     )?;
 
+    if is_realm {
+        config_realm(&mut vmm, vm_resources.machine_config.realm_config.clone().unwrap(), mem_need_populate)?;
+
+        for vcpu in vcpus.iter_mut() {
+            let feature = KVM_ARM_VCPU_REC as i32;
+            vcpu.kvm_vcpu.fd.vcpu_finalize(&feature)
+                .map_err(StartMicrovmError::FinalizeRec)?;
+            println!("vcpu inited {}", vcpu.kvm_vcpu.index);
+        }
+        activate_realm(&mut vmm)?;
+    }
+
     let vmm = Arc::new(Mutex::new(vmm));
 
     #[cfg(feature = "gdb")]
@@ -344,7 +390,10 @@ pub fn build_microvm_for_boot(
     } else {
         debug!("No GDB socket provided not starting gdb server.");
     }
-
+    
+    for vcpu in vcpus.iter_mut() {
+        vcpu.set_vmm(vmm.clone());
+    }
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     vmm.lock()
         .unwrap()
@@ -373,6 +422,141 @@ pub fn build_microvm_for_boot(
     event_manager.add_subscriber(vmm.clone());
 
     Ok(vmm)
+}
+
+pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate: Vec<(GuestAddress, GuestUsize)>) -> Result<(), StartMicrovmError> {
+    if realm_config.hash_algorithm.is_some() {
+        let mut hash_algo_cfg = kvm_cap_arm_rme_config_item {
+            cfg: KVM_CAP_ARM_RME_CFG_HASH_ALGO,
+            ..Default::default()
+        };
+        hash_algo_cfg.__bindgen_anon_1.__bindgen_anon_2.hash_algo = if realm_config.hash_algorithm.unwrap() == "SHA256" {
+            KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA256
+        } else {
+            KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA512
+        };
+        let kvm_enable_cap_cfg = kvm_enable_cap {
+            cap: KVM_CAP_ARM_RME,
+            args: [
+                KVM_CAP_ARM_RME_CONFIG_REALM as u64,
+                &hash_algo_cfg as *const _ as u64,
+                0,
+                0,
+            ],
+            ..Default::default()
+        };
+        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::ConfigHashAlgo(e))?;
+    }
+    if realm_config.personalization_value.is_some() {
+        let mut rpv_cfg = kvm_cap_arm_rme_config_item {
+            cfg: KVM_CAP_ARM_RME_CFG_RPV,
+            ..Default::default()
+        };
+        for i in 0..64 {
+            // SAFETY: we only use the rpv as a 64 bytes array
+            unsafe {rpv_cfg.__bindgen_anon_1.__bindgen_anon_1.rpv[i] = realm_config.personalization_value.unwrap()[i]; }
+        }
+        let kvm_enable_cap_cfg = kvm_enable_cap {
+            cap: KVM_CAP_ARM_RME,
+            args: [
+                KVM_CAP_ARM_RME_CONFIG_REALM as u64,
+                &rpv_cfg as *const _ as u64,
+                0,
+                0,
+            ],
+            ..Default::default()
+        };
+        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::ConfigHashAlgo(e))?;
+    }
+    
+    let kvm_enable_cap_cfg = kvm_enable_cap {
+        cap: KVM_CAP_ARM_RME,
+        args: [
+            KVM_CAP_ARM_RME_CREATE_RD as u64,
+            0,
+            0,
+            0,
+        ],
+        ..Default::default()
+    };
+    vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::CreateRealmDescriptor(e))?;
+    use log::info;
+    vmm.guest_memory.iter().for_each(|region| {
+        info!(
+            "guest memory region start: 0x{:016x}\tend: 0x{:016x}",
+            region.start_addr().raw_value(),
+            region.start_addr().raw_value() + region.len() - 1
+        );
+    });
+    vmm.guest_memory.iter().try_for_each(|region| {
+        let init_ipa_args = kvm_cap_arm_rme_init_ipa_args {
+            init_ipa_base: region.start_addr().raw_value(),
+            init_ipa_size: region.len() as u64,
+            ..Default::default()
+        };
+        let kvm_enable_cap_cfg = kvm_enable_cap {
+            cap: KVM_CAP_ARM_RME,
+            args: [
+                KVM_CAP_ARM_RME_INIT_IPA_REALM as u64,
+                &init_ipa_args as *const _ as u64,
+                0,
+                0,
+            ],
+            ..Default::default()
+        };
+
+        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg)
+    }).map_err(|e| StartMicrovmError::InitIpaRealm(e))?;
+
+    mem_need_populate.iter().try_for_each(|region| {
+        let populate_ipa_args = kvm_cap_arm_rme_populate_realm_args {
+            populate_ipa_base: region.0.raw_value(),
+            populate_ipa_size: region.1,
+            flags: 1, // KVM_ARM_RME_POPULATE_FLAGS_MEASURE
+            ..Default::default()
+        };
+        let kvm_enable_cap_cfg = kvm_enable_cap {
+            cap: KVM_CAP_ARM_RME,
+            args: [
+                KVM_CAP_ARM_RME_POPULATE_REALM as u64,
+                &populate_ipa_args as *const _ as u64,
+                0,
+                0,
+            ],
+            ..Default::default()
+        };
+
+        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg)
+    }).map_err(|e| StartMicrovmError::PopulateRealm(e))?;
+
+    vmm.guest_memory.iter().try_for_each(|region| {
+        // TODO: mmap(PROT_NONE) the region 
+        let set_mem_attributes_args = kvm_memory_attributes {
+            address: region.start_addr().raw_value(),
+            size: region.len() as u64,
+            attributes: KVM_MEMORY_ATTRIBUTE_PRIVATE as u64,
+            ..Default::default()
+        };
+
+        vmm.vm.fd().set_memory_attributes(set_mem_attributes_args)
+    }).map_err(|e| StartMicrovmError::SetMemoryAttributes(e))?;
+
+    Ok(())
+}
+
+pub fn activate_realm(vmm: &mut Vmm) -> Result<(), StartMicrovmError> {
+    let kvm_enable_cap_cfg = kvm_enable_cap {
+        cap: KVM_CAP_ARM_RME,
+        args: [
+            KVM_CAP_ARM_RME_ACTIVATE_REALM as u64,
+            0,
+            0,
+            0,
+        ],
+        ..Default::default()
+    };
+    vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::ActivateRealm(e))?;
+    Ok(())
 }
 
 /// Builds and boots a microVM based on the current Firecracker VmResources configuration.
@@ -455,6 +639,20 @@ pub fn build_microvm_from_snapshot(
     vm_resources: &mut VmResources,
 ) -> Result<Arc<Mutex<Vmm>>, BuildMicrovmFromSnapshotError> {
     // Build Vmm.
+    let kvm = Kvm::new(microvm_state.kvm_state.kvm_cap_modifiers.clone())
+        .map_err(VmmError::Kvm)
+        .map_err(StartMicrovmError::Internal)?;
+    // Set up Kvm Vm and register memory regions.
+    // Build custom CPU config if a custom template is provided.
+    let vm = Vm::new(&kvm, vm_resources.machine_config.clone())
+        .map_err(VmmError::Vm)
+        .map_err(StartMicrovmError::Internal)?;
+    kvm.check_memory(&guest_memory)
+        .map_err(VmmError::Kvm)
+        .map_err(StartMicrovmError::Internal)?;
+    vm.memory_init(&guest_memory)
+        .map_err(VmmError::Vm)
+        .map_err(StartMicrovmError::Internal)?;
     debug!("event_start: build microvm from snapshot");
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
@@ -462,7 +660,8 @@ pub fn build_microvm_from_snapshot(
         guest_memory,
         uffd,
         vm_resources.machine_config.vcpu_count,
-        microvm_state.kvm_state.kvm_cap_modifiers.clone(),
+        kvm,
+        vm,
     )?;
 
     #[cfg(target_arch = "x86_64")]
@@ -559,10 +758,25 @@ pub fn build_microvm_from_snapshot(
     Ok(vmm)
 }
 
+// init reserved mem to 0
+fn load_reserved(guest_memory: &GuestMemoryMmap)->Result<(GuestAddress, GuestUsize), StartMicrovmError> {
+    let size=layout::RESERVERD_MEM_SIZE as usize;
+    //to do:build GuestAddress
+    let start_addr=GuestAddress(layout::RESERVERD_MEM_START);
+    let reserved_size=GuestAddress(size as u64);
+    let reserved_guest_size: GuestUsize = reserved_size.raw_value();
+    let zero_buf = vec![0u8; size as usize];
+    let mut cursor = Cursor::new(zero_buf);
+    //
+    guest_memory
+        .read_exact_volatile_from(start_addr, &mut cursor,size);
+    Ok((start_addr,reserved_guest_size))
+
+}
 fn load_kernel(
     boot_config: &BootConfig,
     guest_memory: &GuestMemoryMmap,
-) -> Result<GuestAddress, StartMicrovmError> {
+) -> Result<(GuestAddress, GuestUsize), StartMicrovmError> {
     let mut kernel_file = boot_config
         .kernel_file
         .try_clone()
@@ -586,7 +800,7 @@ fn load_kernel(
     )
     .map_err(StartMicrovmError::KernelLoader)?;
 
-    Ok(entry_addr.kernel_load)
+    Ok((entry_addr.kernel_load, entry_addr.kernel_end))
 }
 
 fn load_initrd_from_config(
@@ -667,7 +881,7 @@ pub fn setup_serial_device(
             SerialEventsWrapper {
                 buffer_ready_event_fd: Some(kick_stdin_read_evt),
             },
-            SerialOut::Stdout(out),
+            SerialOut::Stdout(crate::devices::legacy::serial::BufferedStdout::new(out)),
         ),
         input: Some(input),
     })));
@@ -680,6 +894,7 @@ fn attach_legacy_devices_aarch64(
     event_manager: &mut EventManager,
     vmm: &mut Vmm,
     cmdline: &mut LoaderKernelCmdline,
+    is_realm: bool,
 ) -> Result<(), VmmError> {
     // Serial device setup.
     let cmdline_contains_console = cmdline
@@ -696,9 +911,13 @@ fn attach_legacy_devices_aarch64(
         vmm.mmio_device_manager
             .register_mmio_serial(vmm.vm.fd(), &mut vmm.resource_allocator, serial, None)
             .map_err(VmmError::RegisterMMIODevice)?;
-        vmm.mmio_device_manager
-            .add_mmio_serial_to_cmdline(cmdline)
-            .map_err(VmmError::RegisterMMIODevice)?;
+        // TODO: for Realm, we cannot use early console
+        if !is_realm {
+            vmm.mmio_device_manager
+                .add_mmio_serial_to_cmdline(cmdline)
+                .map_err(VmmError::RegisterMMIODevice)?;
+        }
+        println!("cmdline: {:?}", cmdline);
     }
 
     let rtc = RTCDevice(Rtc::with_events(
@@ -814,6 +1033,7 @@ pub fn configure_system_for_boot(
                     vmm.guest_memory(),
                     entry_addr,
                     &vcpu_config,
+                    machine_config.realm_config.is_some(),
                     &optional_capabilities,
                 )
                 .map_err(VmmError::VcpuConfigure)
@@ -927,7 +1147,7 @@ fn attach_block_devices<'a, I: Iterator<Item = &'a Arc<Mutex<Block>>> + Debug>(
                     Some(ref partuuid) => {
                         cmdline.insert_str(format!("root=PARTUUID={}", partuuid))?
                     }
-                    None => cmdline.insert_str("root=/dev/vda")?,
+                    None => cmdline.insert_str("root=/dev/vda1")?,
                 }
                 match locked.read_only() {
                     true => cmdline.insert_str("ro")?,
