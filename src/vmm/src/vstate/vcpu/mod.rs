@@ -19,6 +19,7 @@ use kvm_ioctls::VcpuExit;
 use kvm_ioctls::VcpuFd;
 use libc::{c_int, c_void, siginfo_t};
 use log::{error, info, warn};
+use vm_memory::{GuestAddress, GuestMemory, GuestMemoryRegion};
 use vmm_sys_util::errno;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -585,7 +586,10 @@ fn handle_kvm_exit(
                 )))
             }
             VcpuExit::MemoryFault(flag, gpa, size) => {
-                // TODO: map or unmap memory region
+                //
+                if flag!=0 {
+                    vmm.lock().unwrap().guest_memory.unmap_guest_range(GuestAddress(gpa),size as usize);
+                }
                 METRICS.vcpu.failures.inc();
                 let set_mem_attributes_args = kvm_memory_attributes {
                     address: gpa,
@@ -598,6 +602,9 @@ fn handle_kvm_exit(
                     ..Default::default()
                 };
                 vmm.lock().unwrap().vm.fd().set_memory_attributes(set_mem_attributes_args).map_err(VcpuError::SetMemoryAttributes)?;
+                if flag==0{
+                    vmm.lock().unwrap().guest_memory.map_guest_range(GuestAddress(gpa),size as usize);
+                }
                 Ok(VcpuEmulation::Handled)
             }
             VcpuExit::InternalError => {

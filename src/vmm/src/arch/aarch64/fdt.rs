@@ -398,7 +398,7 @@ fn create_virtio_node<T: DeviceInfoForFDT + Clone + Debug>(
     dev_info: &T,
 ) -> Result<(), FdtError> {
     let virtio_mmio = fdt.begin_node(&format!("virtio_mmio@{:x}", dev_info.addr()))?;
-
+    fdt.property_null("dma-coherent")?;
     fdt.property_string("compatible", "virtio,mmio")?;
     fdt.property_array_u64("reg", &[dev_info.addr(), dev_info.length()])?;
     fdt.property_array_u32(
