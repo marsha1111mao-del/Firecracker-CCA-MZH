@@ -145,6 +145,10 @@ pub enum VsockError {
     IovDeque(IovDequeError),
     /// Tried to push to full IovDeque.
     IovDequeOverflow,
+    /// Cid_Uds_map error
+    VsockCidMapUds(std::io::Error),
+    /// Cid not found error
+    VsockCidNotFound
 }
 
 impl From<IoVecError> for VsockError {

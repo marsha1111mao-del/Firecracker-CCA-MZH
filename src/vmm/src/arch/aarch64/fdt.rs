@@ -250,30 +250,41 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
     Ok(())
 }
 
-fn create_reserverd_memory_node(fdt:&mut FdtWriter,guest_mem:&GuestMemoryMmap)->Result<(),FdtError>{
-    let reserved_mem_size= super::layout::RESERVERD_MEM_SIZE;
-    assert!(super::layout::RESERVERD_MEM_START % 0x20_0000 == 0, "reserved_start must be 2MB-aligned");
-    assert!(super::layout::RESERVERD_MEM_SIZE % 0x20_0000 == 0, "reserved_size must be 2MB-aligned");
-    let reserved_mem_reg_prop = &[
-        0x0,
-        super::layout::RESERVERD_MEM_START,
-        0x0,
-        reserved_mem_size,
-    ];
-    let reserved_mem=fdt.begin_node("reserved-memory")?;
+pub fn create_reserverd_memory_node(fdt: &mut FdtWriter, _guest_mem: &GuestMemoryMmap) -> Result<(), FdtError> {
+    let reserved_mem_size = super::layout::RESERVERD_MEM_SIZE;
+    let reserved_mem_start = super::layout::RESERVERD_MEM_START;
+
+    // 检查对齐
+    assert!(reserved_mem_start % 0x20_0000 == 0, "reserved_start must be 2MB-aligned");
+    assert!(reserved_mem_size % 0x20_0000 == 0, "reserved_size must be 2MB-aligned");
+
+    // 1. 开始构建 /reserved-memory 节点
+    let reserved_mem = fdt.begin_node("reserved-memory")?;
     fdt.property_u32("#address-cells", 2)?;
     fdt.property_u32("#size-cells", 2)?;
     fdt.property_null("ranges")?;
-    let reserved_region_name=format!("reserved_region@{:x}", super::layout::RESERVERD_MEM_START);
+
+    // 2. 构建具体的 reserved_region 子节点
+    let reserved_region_name = format!("reserved_region@{:x}", reserved_mem_start);
     let reserved_region = fdt.begin_node(&reserved_region_name)?;
+
+    // 【修正点】: reg 属性应该只包含两个 u64 (addr, size)。
+    // property_array_u64 会将每个 u64 拆分为两个 u32 (hi, lo) 写入 FDT，
+    // 最终生成 16 字节数据 <addr_hi addr_lo size_hi size_lo>，符合 #address-cells=2, #size-cells=2。
+    let reserved_mem_reg_prop = &[
+        reserved_mem_start,
+        reserved_mem_size,
+    ];
+
     fdt.property_string("compatible", "shared-dma-pool")?;
+    fdt.property_null("no-map")?; 
     fdt.property_array_u64("reg", reserved_mem_reg_prop)?;
-    fdt.property_null("no-map")?;
-    fdt.end_node(reserved_region)?;
-    fdt.end_node(reserved_mem)?;
+    
+    
+    fdt.end_node(reserved_region)?; // end reserved_region
+    fdt.end_node(reserved_mem)?;    // end reserved-memory
     Ok(())
 }
-
 
 fn create_chosen_node(
     fdt: &mut FdtWriter,
