@@ -5,14 +5,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::ptr;
 
 use kvm_bindings::{kvm_create_guest_memfd, kvm_userspace_memory_region, kvm_userspace_memory_region2, KVM_MEM_GUEST_MEMFD, KVM_MEM_LOG_DIRTY_PAGES, KVM_VM_TYPE_ARM_NORMAL, KVM_VM_TYPE_ARM_REALM};
 use kvm_ioctls::{Cap, VmFd};
+use libc::{MAP_SHARED, PROT_READ, PROT_WRITE, off_t};
+use vm_memory::guest_memory;
 use vmm_sys_util::eventfd::EventFd;
 
 use crate::arch::aarch64::layout;
+use crate::dumbo::pdu::tcp::Flags;
 use crate::logger::info;
 use crate::vmm_config::machine_config::MachineConfig;
 use crate::vstate::memory::{Address, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};

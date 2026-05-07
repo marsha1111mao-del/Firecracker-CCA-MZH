@@ -68,7 +68,8 @@ pub mod io_uring;
 /// trait and provides an *event-handler* as part of its API. This *event-handler*
 /// needs to be called by the user on every event on the rate limiter's `AsRawFd` FD.
 pub mod rate_limiter;
-
+pub mod pmthor;
+pub mod gpu_passthrough;
 /// Module for handling ACPI tables.
 /// Currently, we only use ACPI on x86 microVMs.
 #[cfg(target_arch = "x86_64")]

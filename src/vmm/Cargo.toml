@@ -30,6 +30,7 @@ log = { version = "0.4.26", features = ["std", "serde"] }
 log-instrument = { path = "../log-instrument", optional = true }
 memfd = "0.6.3"
 micro_http = { git = "https://github.com/firecracker-microvm/micro-http" }
+nix = { version = "0.31.2", features = ["ioctl", "fs"] }
 
 semver = { version = "1.0.25", features = ["serde"] }
 serde = { version = "1.0.218", features = ["derive", "rc"] }

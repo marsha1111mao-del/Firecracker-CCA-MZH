@@ -250,6 +250,7 @@ impl MMIODeviceManager {
         _cmdline: &mut kernel_cmdline::Cmdline,
     ) -> Result<MMIODeviceInfo, MmioError> {
         let device_info = self.allocate_mmio_resources(resource_allocator, 1)?;
+        info!("register_mmio_virtio:{:#?}",&device_info);
         self.register_mmio_virtio(vm, device_id, mmio_device, &device_info)?;
         #[cfg(target_arch = "x86_64")]
         {

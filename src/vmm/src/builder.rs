@@ -28,7 +28,8 @@ use vm_superio::Rtc;
 use vm_superio::Serial;
 use vmm_sys_util::errno;
 use vmm_sys_util::eventfd::EventFd;
-
+use log::info;
+use crate::gpu_passthrough::GpuPassthroughManager;
 #[cfg(target_arch = "x86_64")]
 use crate::acpi;
 use crate::arch::aarch64::{get_fdt_addr, layout};
@@ -156,6 +157,12 @@ pub enum StartMicrovmError {
     /// Error cloning Vcpu fds
     #[cfg(feature = "gdb")]
     VcpuFdCloneError(#[from] crate::vstate::vcpu::CopyKvmFdError),
+    /// Error init gpu mmio 
+    #[cfg(target_arch = "aarch64")]
+    GpuMmioInit(kvm_ioctls::Error),
+    /// Failed to setup GPU Passthrough: {0}
+    #[cfg(target_arch = "aarch64")]
+    GpuPassthrough(String),
 }
 
 /// It's convenient to automatically convert `linux_loader::cmdline::Error`s
@@ -298,7 +305,6 @@ pub fn build_microvm_for_boot(
     vm.memory_init(&guest_memory)
         .map_err(VmmError::Vm)
         .map_err(StartMicrovmError::Internal)?;
-
     let (mut vmm, mut vcpus) = create_vmm_and_vcpus(
         instance_info,
         event_manager,
@@ -394,6 +400,10 @@ pub fn build_microvm_for_boot(
     for vcpu in vcpus.iter_mut() {
         vcpu.set_vmm(vmm.clone());
     }
+    #[cfg(target_arch = "aarch64")]
+    gpu_mmio_init(&vmm.lock().unwrap().vm)?;
+    #[cfg(target_arch = "aarch64")]
+    gpu_irq_init(&vmm.lock().unwrap().vm)?;
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     vmm.lock()
         .unwrap()
@@ -406,7 +416,6 @@ pub fn build_microvm_for_boot(
         )
         .map_err(VmmError::VcpuStart)
         .map_err(Internal)?;
-
     // Load seccomp filters for the VMM thread.
     // Execution panics if filters cannot be loaded, use --no-seccomp if skipping filters
     // altogether is the desired behaviour.
@@ -887,6 +896,52 @@ pub fn setup_serial_device(
     })));
     event_manager.add_subscriber(serial.clone());
     Ok(serial)
+}
+#[cfg(target_arch = "aarch64")]
+fn gpu_mmio_init(vm:&Vm)-> Result<(), StartMicrovmError> {
+    const GPU_MMIO_ADDR:u64=0xfb000000;
+    const GPU_MMIO_SIZE:u64=0x200000;
+    vm.fd().set_mmio_region(GPU_MMIO_ADDR,GPU_MMIO_SIZE).map_err(StartMicrovmError::GpuMmioInit)?;
+    Ok(())
+}
+#[cfg(target_arch = "aarch64")]
+fn gpu_irq_init(vm:&Vm)-> Result<(), StartMicrovmError> {
+    // const GPU_JOB_LINUX_IRQ:u64=77;
+    // const GPU_MMU_LINUX_IRQ:u64=78;
+    // const GPU_GPU_LINUX_IRQ:u64=79;
+    // const GPU_JOB_IRQ:u64=92+32;
+    // const GPU_MMU_IRQ:u64=93+32;
+    // const GPU_GPU_IRQ:u64=94+32;
+    // const VGIC_CONFIG_LEVEL:u64=1;
+    // 1. 定义起始 GSI (Guest 内部的中断号)
+    // 根据你的定义，Job IRQ 是 92 + 32 = 124
+    // 定义 Guest 侧的中断号起始值 (92 + 32)
+    const GPU_BASE_GSI: u32 = 92; 
+    const GPU_DEV_PATH: &str = "/dev/pmthor";
+
+    // 1. 初始化管理器 (打开设备并创建 EventFD)
+    // 使用 .map_err 将 io::Error 转换为 StartMicrovmError::GpuPassthrough
+    let gpu_mgr = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)
+        .map_err(|e| StartMicrovmError::GpuPassthrough(
+            format!("Failed to open GPU device {}: {}", GPU_DEV_PATH, e)
+        ))?;
+
+    // 2. 执行绑定 (配置物理驱动和 KVM irqfd)
+    gpu_mgr.attach_to_kvm(vm.fd())
+        .map_err(|e| StartMicrovmError::GpuPassthrough(
+            format!("Failed to setup GPU irqfd: {}", e)
+        ))?;
+
+    // 为了确保 EventFD 在虚拟机运行期间不被 Drop (关闭)，
+    // 你需要确保 gpu_mgr 的生命周期足够长。
+    // 如果你在 Vm 结构体中定义了存放它的地方：
+    // vm.gpu_manager = Some(gpu_mgr); 
+    
+    // 如果暂时没地方放，为了联调可以通过 Box::leak 保持（仅限测试）：
+    std::boxed::Box::leak(std::boxed::Box::new(gpu_mgr));
+
+    info!("GPU Passthrough IRQs (GSI {}-{}) initialized successfully.", GPU_BASE_GSI, GPU_BASE_GSI + 2);
+    Ok(())
 }
 
 #[cfg(target_arch = "aarch64")]

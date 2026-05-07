@@ -4,19 +4,20 @@
 // Portions Copyright 2017 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
-
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt::Debug;
 use log::info;
 use vm_fdt::{Error as VmFdtError, FdtWriter, FdtWriterNode};
 use vm_memory::GuestMemoryError;
-
 use super::super::{DeviceType, InitrdConfig};
 use super::cache_info::{read_cache_config, CacheEntry};
 use super::gic::GICDevice;
 use crate::devices::acpi::vmgenid::{VmGenId, VMGENID_MEM_SIZE};
 use crate::vstate::memory::{Address, GuestMemory, GuestMemoryMmap};
+ use std::fs;
+ use std::io::Write;
+ use std::path::PathBuf;
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
 const GIC_PHANDLE: u32 = 1;
@@ -101,11 +102,16 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     create_devices_node(&mut fdt_writer, device_info)?;
     create_vmgenid_node(&mut fdt_writer, vmgenid)?;
 
+    create_gpu_node(&mut fdt_writer)?;
     // End Header node.
     fdt_writer.end_node(root)?;
-
     // Allocate another buffer so we can format and then write fdt to guest.
     let fdt_final = fdt_writer.finish()?;
+
+    let path=PathBuf::from("/root/GPU-SFTP/");
+    let mut output=fs::OpenOptions::new().write(true).create(true).open(path.join("firecracker.dtb")).unwrap();
+    output.write_all(&fdt_final).unwrap();
+
     Ok(fdt_final)
 }
 
@@ -249,6 +255,52 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
 
     Ok(())
 }
+fn create_gpu_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
+    let gpu_node = fdt.begin_node("gpu@fb000000")?;
+
+    // compatible: 多个字符串，用 null 终止符拼接
+    let compatible = b"rockchip,rk3588-mali\0";
+    fdt.property("compatible", compatible)?;
+
+    // reg: base = 0x0_fb000000, size = 0x0_200000
+    // 正确格式：4个 u32: <addr_hi addr_low size_hi size_low>
+    // 
+    // 地址 0xfb000000 (高位0x00, 低位0xfb000000)
+    // 大小 0x200000   (高位0x00, 低位0x00200000)
+    fdt.property_array_u32(
+        "reg",
+        &[
+            0x00, 0xfb000000, // Address: 0x00fb000000
+            0x00, 0x00200000, // Size: 0x0000200000
+        ],
+    )?;
+    
+    // // clocks: 三个都指向同一个 apb-pclk (phandle = 2)
+    // const CLOCK_PHANDLE: u32 = 0x02; // 假设 phandle 0x02 是 apb-pclk
+    // fdt.property_array_u32("clocks", &[CLOCK_PHANDLE, CLOCK_PHANDLE, CLOCK_PHANDLE])?;
+
+    // // clock-names: 多个字符串，用 null 终止符拼接
+    // let clock_names = b"core\0coregroup\0stacks\0";
+    // fdt.property("clock-names", clock_names)?;
+
+    let interrupts = [
+        GIC_FDT_IRQ_TYPE_SPI, 92, IRQ_TYPE_LEVEL_HI,
+        GIC_FDT_IRQ_TYPE_SPI, 93, IRQ_TYPE_LEVEL_HI,
+        GIC_FDT_IRQ_TYPE_SPI, 94, IRQ_TYPE_LEVEL_HI,
+    ];
+    fdt.property_array_u32("interrupts", &interrupts)?;
+
+    // interrupt-names
+    let interrupt_names = b"job\0mmu\0gpu\0";
+    fdt.property("interrupt-names", interrupt_names)?;
+
+    // status = "okay"
+    fdt.property_string("status", "okay")?;
+
+    fdt.end_node(gpu_node)?;
+    Ok(())
+}
+
 
 pub fn create_reserverd_memory_node(fdt: &mut FdtWriter, _guest_mem: &GuestMemoryMmap) -> Result<(), FdtError> {
     let reserved_mem_size = super::layout::RESERVERD_MEM_SIZE;
