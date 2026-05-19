@@ -1,0 +1,272 @@
+commit 198cac331e6d31b71887f1c664cbad389eaa1e0f
+Author: MZH-Work <mzh@google.com>
+Date:   Tue May 19 10:26:26 2026 +0800
+
+    util stage
+
+diff --git a/.gitignore b/.gitignore
+index 155e4cbd..c127e356 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -15,3 +15,4 @@ test_results/*
+ /resources/linux
+ /resources/x86_64
+ /resources/aarch64
++sftp-build.sh
+\ No newline at end of file
+diff --git a/sftp-build.sh b/sftp-build.sh
+index de056d10..6d77399f 100755
+--- a/sftp-build.sh
++++ b/sftp-build.sh
+@@ -1,2 +1,2 @@
+ cargo build --release --target aarch64-unknown-linux-musl  --bins --examples
+-cp -v build/cargo_target/aarch64-unknown-linux-musl/release/firecracker /home/mzh/opencca-work/SFTP_folder/firecracker-bins/
++cp -v build/cargo_target/aarch64-unknown-linux-musl/release/firecracker /home/mzh/gpu/GPU-SFTP/firecracker-bins/
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 4128be9b..d0ea13fa 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -219,7 +219,7 @@ fn create_vmm_and_vcpus(
+         pio_dev_mgr.register_devices(vm.fd()).unwrap();
+         pio_dev_mgr
+     };
+-
++    let gpu_passthrough_manager=gpu_irq_init(&vm)?;
+     let vmm = Vmm {
+         events_observer: Some(std::io::stdin()),
+         instance_info: instance_info.clone(),
+@@ -235,6 +235,7 @@ fn create_vmm_and_vcpus(
+         #[cfg(target_arch = "x86_64")]
+         pio_device_manager,
+         acpi_device_manager,
++        gpu_passthrough_manager,
+     };
+ 
+     Ok((vmm, vcpus))
+@@ -402,8 +403,6 @@ pub fn build_microvm_for_boot(
+     }
+     #[cfg(target_arch = "aarch64")]
+     gpu_mmio_init(&vmm.lock().unwrap().vm)?;
+-    #[cfg(target_arch = "aarch64")]
+-    gpu_irq_init(&vmm.lock().unwrap().vm)?;
+     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
+     vmm.lock()
+         .unwrap()
+@@ -904,8 +903,8 @@ fn gpu_mmio_init(vm:&Vm)-> Result<(), StartMicrovmError> {
+     vm.fd().set_mmio_region(GPU_MMIO_ADDR,GPU_MMIO_SIZE).map_err(StartMicrovmError::GpuMmioInit)?;
+     Ok(())
+ }
+-#[cfg(target_arch = "aarch64")]
+-fn gpu_irq_init(vm:&Vm)-> Result<(), StartMicrovmError> {
++
++fn gpu_irq_init(vm:&Vm)-> Result<GpuPassthroughManager, StartMicrovmError> {
+     // const GPU_JOB_LINUX_IRQ:u64=77;
+     // const GPU_MMU_LINUX_IRQ:u64=78;
+     // const GPU_GPU_LINUX_IRQ:u64=79;
+@@ -938,10 +937,10 @@ fn gpu_irq_init(vm:&Vm)-> Result<(), StartMicrovmError> {
+     // vm.gpu_manager = Some(gpu_mgr); 
+     
+     // 如果暂时没地方放，为了联调可以通过 Box::leak 保持（仅限测试）：
+-    std::boxed::Box::leak(std::boxed::Box::new(gpu_mgr));
++    // std::boxed::Box::leak(std::boxed::Box::new(gpu_mgr));
+ 
+     info!("GPU Passthrough IRQs (GSI {}-{}) initialized successfully.", GPU_BASE_GSI, GPU_BASE_GSI + 2);
+-    Ok(())
++    Ok(gpu_mgr)
+ }
+ 
+ #[cfg(target_arch = "aarch64")]
+@@ -1288,7 +1287,8 @@ pub(crate) mod tests {
+     use crate::devices::virtio::rng::device::ENTROPY_DEV_ID;
+     use crate::devices::virtio::vsock::{TYPE_VSOCK, VSOCK_DEV_ID};
+     use crate::devices::virtio::{TYPE_BALLOON, TYPE_BLOCK, TYPE_RNG};
+-    use crate::mmds::data_store::{Mmds, MmdsVersion};
++    use crate::gpu_passthrough;
++use crate::mmds::data_store::{Mmds, MmdsVersion};
+     use crate::mmds::ns::MmdsNetworkStack;
+     use crate::test_utils::{single_region_mem, single_region_mem_at};
+     use crate::vmm_config::balloon::{BalloonBuilder, BalloonDeviceConfig, BALLOON_DEV_ID};
+@@ -1299,7 +1299,8 @@ pub(crate) mod tests {
+     use crate::vmm_config::vsock::tests::default_config;
+     use crate::vmm_config::vsock::{VsockBuilder, VsockDeviceConfig};
+     use crate::vstate::vm::tests::setup_vm_with_memory;
+-
++    const GPU_BASE_GSI: u32 = 92; 
++    const GPU_DEV_PATH: &str = "/dev/pmthor";
+     #[derive(Debug)]
+     pub(crate) struct CustomBlockConfig {
+         drive_id: String,
+@@ -1358,6 +1359,7 @@ pub(crate) mod tests {
+ 
+         let mmio_device_manager = MMIODeviceManager::new();
+         let acpi_device_manager = ACPIDeviceManager::new();
++        let gpu_passthrough_manager=GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)?;
+         #[cfg(target_arch = "x86_64")]
+         let pio_device_manager = PortIODeviceManager::new(
+             Arc::new(Mutex::new(BusDevice::Serial(SerialWrapper {
+@@ -1391,6 +1393,7 @@ pub(crate) mod tests {
+             #[cfg(target_arch = "x86_64")]
+             pio_device_manager,
+             acpi_device_manager,
++            gpu_passthrough_manager,
+         }
+     }
+ 
+diff --git a/src/vmm/src/gpu_passthrough.rs b/src/vmm/src/gpu_passthrough.rs
+index 6317a4e7..795306dd 100644
+--- a/src/vmm/src/gpu_passthrough.rs
++++ b/src/vmm/src/gpu_passthrough.rs
+@@ -47,12 +47,13 @@ macro_rules! iowr {
+ const KVM_IRQFD: libc::c_int = iow!(KVMIO, 0x76, kvm_bindings::kvm_irqfd);
+ const KVM_SET_GSI_ROUTING: libc::c_int = iow!(KVMIO, 0x6a, kvm_bindings::kvm_irq_routing);
+ const KVM_GET_GSI_ROUTING: libc::c_int = iowr!(KVMIO, 0x67, kvm_bindings::kvm_irq_routing);
++#[derive(Debug)]
+ pub struct GpuIrqContext {
+     pub trigger: EventFd,
+     pub resample: EventFd,
+     pub gsi: u32,
+ }
+-
++#[derive(Debug)]
+ pub struct GpuPassthroughManager {
+     pub pmthor: PmThorDevice,
+     pub irqs: Vec<GpuIrqContext>,
+@@ -207,21 +208,48 @@ impl GpuPassthroughManager {
+         }
+         Ok(())
+     }
+-    
++    pub fn detach_from_kvm(&self, vm_fd: &VmFd) -> io::Result<()> {
++        println!("GpuPassthrough: Detaching irqfds during VM shutdown...");
++
++        for ctx in &self.irqs {
++            // 普通 deassign
++            let _ = unsafe {
++                ioctl(vm_fd.as_raw_fd(), KVM_IRQFD, &kvm_irqfd {
++                    fd: ctx.trigger.as_raw_fd() as u32,
++                    gsi: ctx.gsi,
++                    flags: 0,
++                    ..Default::default()
++                })
++            };
++
++            // RESAMPLE deassign
++            let _ = unsafe {
++                ioctl(vm_fd.as_raw_fd(), KVM_IRQFD, &kvm_irqfd {
++                    fd: ctx.trigger.as_raw_fd() as u32,
++                    gsi: ctx.gsi,
++                    flags: KVM_IRQFD_FLAG_RESAMPLE,
++                    resamplefd: ctx.resample.as_raw_fd() as u32,
++                    ..Default::default()
++                })
++            };
++        }
++
++        // 给内核异步清理足够时间
++        std::thread::sleep(std::time::Duration::from_millis(150));
++
++        Ok(())
++    }
+     pub fn attach_to_kvm(&self, vm_fd: &VmFd) -> io::Result<()> {
+         //self.setup_irq_routing(vm_fd)?;
++        self.pmthor.clean_irq();
+         println!("GpuPassthrough: KVM GSI routing table updated.");
+         let indices = [IrqIndex::Job, IrqIndex::Mmu, IrqIndex::Gpu];
+ 
+         for (i, &index) in indices.iter().enumerate() {
+             let ctx = &self.irqs[i];
+ 
+-            // 1. 设置物理驱动：绑定物理中断到 eventfds
+-            self.pmthor.set_trigger(index, ctx.trigger.as_raw_fd())?;
+-            self.pmthor.set_unmask_event(index, ctx.resample.as_raw_fd())?;
+ 
+-            // 2. 手动构造 kvm_irqfd 并调用 ioctl
+-            // 这样可以绕过库的限制，传入 resamplefd
++            // 2. 手动构造 kvm_irqfd 调用 ioctl，绑定trigger eventfd和resample eventfd到irqfd
+             let irqfd_data = kvm_irqfd {
+                 fd: ctx.trigger.as_raw_fd() as u32,
+                 gsi: ctx.gsi,
+@@ -238,6 +266,9 @@ impl GpuPassthroughManager {
+                 return Err(io::Error::last_os_error());
+             }
+ 
++            // 1. 设置物理驱动：绑定物理中断到 eventfds
++            self.pmthor.set_trigger(index, ctx.trigger.as_raw_fd())?;
++            self.pmthor.set_unmask_event(index, ctx.resample.as_raw_fd())?;
+             println!("GpuPassthrough: Attached IRQ {} (GSI {}) with Resample support", i, ctx.gsi);
+         }
+ 
+diff --git a/src/vmm/src/lib.rs b/src/vmm/src/lib.rs
+index 64ebf92a..9d20f2ab 100644
+--- a/src/vmm/src/lib.rs
++++ b/src/vmm/src/lib.rs
+@@ -143,6 +143,7 @@ use crate::devices::virtio::balloon::{
+ use crate::devices::virtio::block::device::Block;
+ use crate::devices::virtio::net::Net;
+ use crate::devices::virtio::{TYPE_BALLOON, TYPE_BLOCK, TYPE_NET};
++use crate::gpu_passthrough::GpuPassthroughManager;
+ use crate::logger::{error, info, warn, MetricsError, METRICS};
+ use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
+ use crate::rate_limiter::BucketUpdate;
+@@ -327,6 +328,7 @@ pub struct Vmm {
+     #[cfg(target_arch = "x86_64")]
+     pio_device_manager: PortIODeviceManager,
+     acpi_device_manager: ACPIDeviceManager,
++    gpu_passthrough_manager:GpuPassthroughManager,
+ }
+ 
+ impl Vmm {
+@@ -822,7 +824,6 @@ impl Vmm {
+         // Once `vmm.shutdown_exit_code` becomes `Some(exit_code)`, it is the upper layer's
+         // responsibility to break main event loop and propagate the exit code value.
+         info!("Vmm is stopping.");
+-
+         // We send a "Finish" event.  If a VCPU has already exited, this is the only
+         // message it will accept... but running and paused will take it as well.
+         // It breaks out of the state machine loop so that the thread can be joined.
+@@ -895,7 +896,7 @@ impl Drop for Vmm {
+         // ready to be teared down. The line below is a no-op, because the Vmm
+         // has already been stopped by the event manager at this point.
+         self.stop(self.shutdown_exit_code.unwrap_or(FcExitCode::Ok));
+-
++        self.gpu_passthrough_manager.detach_from_kvm(&self.vm.fd());
+         if let Some(observer) = self.events_observer.as_mut() {
+             let res = observer.lock().set_canon_mode().inspect_err(|&err| {
+                 warn!("Cannot set canonical mode for the terminal. {:?}", err);
+diff --git a/src/vmm/src/pmthor.rs b/src/vmm/src/pmthor.rs
+index 3a5008eb..a65595d7 100644
+--- a/src/vmm/src/pmthor.rs
++++ b/src/vmm/src/pmthor.rs
+@@ -1,4 +1,5 @@
+ use std::fs::{File, OpenOptions};
++use std::os::fd;
+ use std::os::unix::io::{AsRawFd, RawFd};
+ use std::path::Path;
+ use std::io;
+@@ -8,6 +9,7 @@ const VFIO_IRQ_SET_DATA_EVENTFD: u32 = 1 << 2;
+ const VFIO_IRQ_SET_ACTION_MASK: u32 = 1 << 3;
+ const VFIO_IRQ_SET_ACTION_UNMASK: u32 = 1 << 4;
+ const VFIO_IRQ_SET_ACTION_TRIGGER: u32 = 1 << 5;
++const VFIO_IRQ_CLEAN: u32 = 1 << 6;
+ 
+ // 手动计算 IOCTL 码: _IOW('P', 0x01, VfioIrqSet) -> 0x40145001
+ const PMTHOR_IOCTL_SET_IRQS:i32 = 0x40145001 as i32;
+@@ -34,7 +36,7 @@ struct IrqSetPayload {
+     hdr: VfioIrqSet,
+     fd: i32,
+ }
+-
++#[derive(Debug)]
+ pub struct PmThorDevice {
+     file: File,
+ }
+@@ -77,4 +79,8 @@ impl PmThorDevice {
+     pub fn set_unmask_event(&self, index: IrqIndex, fd: RawFd) -> io::Result<()> {
+         self.set_irq_raw(index, VFIO_IRQ_SET_ACTION_UNMASK, fd)
+     }
++
++    pub fn clean_irq(&self)->io::Result<()>{
++        self.set_irq_raw(IrqIndex::Mmu, VFIO_IRQ_CLEAN, 0)
++    }
+ }
+\ No newline at end of file

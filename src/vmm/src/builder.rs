@@ -219,7 +219,7 @@ fn create_vmm_and_vcpus(
         pio_dev_mgr.register_devices(vm.fd()).unwrap();
         pio_dev_mgr
     };
-
+    let gpu_passthrough_manager=gpu_irq_init(&vm)?;
     let vmm = Vmm {
         events_observer: Some(std::io::stdin()),
         instance_info: instance_info.clone(),
@@ -235,6 +235,7 @@ fn create_vmm_and_vcpus(
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
         acpi_device_manager,
+        gpu_passthrough_manager,
     };
 
     Ok((vmm, vcpus))
@@ -402,8 +403,6 @@ pub fn build_microvm_for_boot(
     }
     #[cfg(target_arch = "aarch64")]
     gpu_mmio_init(&vmm.lock().unwrap().vm)?;
-    #[cfg(target_arch = "aarch64")]
-    gpu_irq_init(&vmm.lock().unwrap().vm)?;
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     vmm.lock()
         .unwrap()
@@ -904,8 +903,8 @@ fn gpu_mmio_init(vm:&Vm)-> Result<(), StartMicrovmError> {
     vm.fd().set_mmio_region(GPU_MMIO_ADDR,GPU_MMIO_SIZE).map_err(StartMicrovmError::GpuMmioInit)?;
     Ok(())
 }
-#[cfg(target_arch = "aarch64")]
-fn gpu_irq_init(vm:&Vm)-> Result<(), StartMicrovmError> {
+
+fn gpu_irq_init(vm:&Vm)-> Result<GpuPassthroughManager, StartMicrovmError> {
     // const GPU_JOB_LINUX_IRQ:u64=77;
     // const GPU_MMU_LINUX_IRQ:u64=78;
     // const GPU_GPU_LINUX_IRQ:u64=79;
@@ -938,10 +937,10 @@ fn gpu_irq_init(vm:&Vm)-> Result<(), StartMicrovmError> {
     // vm.gpu_manager = Some(gpu_mgr); 
     
     // 如果暂时没地方放，为了联调可以通过 Box::leak 保持（仅限测试）：
-    std::boxed::Box::leak(std::boxed::Box::new(gpu_mgr));
+    // std::boxed::Box::leak(std::boxed::Box::new(gpu_mgr));
 
     info!("GPU Passthrough IRQs (GSI {}-{}) initialized successfully.", GPU_BASE_GSI, GPU_BASE_GSI + 2);
-    Ok(())
+    Ok(gpu_mgr)
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1288,7 +1287,8 @@ pub(crate) mod tests {
     use crate::devices::virtio::rng::device::ENTROPY_DEV_ID;
     use crate::devices::virtio::vsock::{TYPE_VSOCK, VSOCK_DEV_ID};
     use crate::devices::virtio::{TYPE_BALLOON, TYPE_BLOCK, TYPE_RNG};
-    use crate::mmds::data_store::{Mmds, MmdsVersion};
+    use crate::gpu_passthrough;
+use crate::mmds::data_store::{Mmds, MmdsVersion};
     use crate::mmds::ns::MmdsNetworkStack;
     use crate::test_utils::{single_region_mem, single_region_mem_at};
     use crate::vmm_config::balloon::{BalloonBuilder, BalloonDeviceConfig, BALLOON_DEV_ID};
@@ -1299,7 +1299,8 @@ pub(crate) mod tests {
     use crate::vmm_config::vsock::tests::default_config;
     use crate::vmm_config::vsock::{VsockBuilder, VsockDeviceConfig};
     use crate::vstate::vm::tests::setup_vm_with_memory;
-
+    const GPU_BASE_GSI: u32 = 92; 
+    const GPU_DEV_PATH: &str = "/dev/pmthor";
     #[derive(Debug)]
     pub(crate) struct CustomBlockConfig {
         drive_id: String,
@@ -1358,6 +1359,7 @@ pub(crate) mod tests {
 
         let mmio_device_manager = MMIODeviceManager::new();
         let acpi_device_manager = ACPIDeviceManager::new();
+        let gpu_passthrough_manager=GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)?;
         #[cfg(target_arch = "x86_64")]
         let pio_device_manager = PortIODeviceManager::new(
             Arc::new(Mutex::new(BusDevice::Serial(SerialWrapper {
@@ -1391,6 +1393,7 @@ pub(crate) mod tests {
             #[cfg(target_arch = "x86_64")]
             pio_device_manager,
             acpi_device_manager,
+            gpu_passthrough_manager,
         }
     }
 

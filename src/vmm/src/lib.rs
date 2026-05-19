@@ -143,6 +143,7 @@ use crate::devices::virtio::balloon::{
 use crate::devices::virtio::block::device::Block;
 use crate::devices::virtio::net::Net;
 use crate::devices::virtio::{TYPE_BALLOON, TYPE_BLOCK, TYPE_NET};
+use crate::gpu_passthrough::GpuPassthroughManager;
 use crate::logger::{error, info, warn, MetricsError, METRICS};
 use crate::persist::{MicrovmState, MicrovmStateError, VmInfo};
 use crate::rate_limiter::BucketUpdate;
@@ -327,6 +328,7 @@ pub struct Vmm {
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
     acpi_device_manager: ACPIDeviceManager,
+    gpu_passthrough_manager:GpuPassthroughManager,
 }
 
 impl Vmm {
@@ -822,7 +824,6 @@ impl Vmm {
         // Once `vmm.shutdown_exit_code` becomes `Some(exit_code)`, it is the upper layer's
         // responsibility to break main event loop and propagate the exit code value.
         info!("Vmm is stopping.");
-
         // We send a "Finish" event.  If a VCPU has already exited, this is the only
         // message it will accept... but running and paused will take it as well.
         // It breaks out of the state machine loop so that the thread can be joined.
@@ -895,7 +896,7 @@ impl Drop for Vmm {
         // ready to be teared down. The line below is a no-op, because the Vmm
         // has already been stopped by the event manager at this point.
         self.stop(self.shutdown_exit_code.unwrap_or(FcExitCode::Ok));
-
+        self.gpu_passthrough_manager.detach_from_kvm(&self.vm.fd());
         if let Some(observer) = self.events_observer.as_mut() {
             let res = observer.lock().set_canon_mode().inspect_err(|&err| {
                 warn!("Cannot set canonical mode for the terminal. {:?}", err);

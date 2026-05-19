@@ -1,4 +1,5 @@
 use std::fs::{File, OpenOptions};
+use std::os::fd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 use std::io;
@@ -8,6 +9,7 @@ const VFIO_IRQ_SET_DATA_EVENTFD: u32 = 1 << 2;
 const VFIO_IRQ_SET_ACTION_MASK: u32 = 1 << 3;
 const VFIO_IRQ_SET_ACTION_UNMASK: u32 = 1 << 4;
 const VFIO_IRQ_SET_ACTION_TRIGGER: u32 = 1 << 5;
+const VFIO_IRQ_CLEAN: u32 = 1 << 6;
 
 // 手动计算 IOCTL 码: _IOW('P', 0x01, VfioIrqSet) -> 0x40145001
 const PMTHOR_IOCTL_SET_IRQS:i32 = 0x40145001 as i32;
@@ -34,7 +36,7 @@ struct IrqSetPayload {
     hdr: VfioIrqSet,
     fd: i32,
 }
-
+#[derive(Debug)]
 pub struct PmThorDevice {
     file: File,
 }
@@ -76,5 +78,9 @@ impl PmThorDevice {
 
     pub fn set_unmask_event(&self, index: IrqIndex, fd: RawFd) -> io::Result<()> {
         self.set_irq_raw(index, VFIO_IRQ_SET_ACTION_UNMASK, fd)
+    }
+
+    pub fn clean_irq(&self)->io::Result<()>{
+        self.set_irq_raw(IrqIndex::Mmu, VFIO_IRQ_CLEAN, 0)
     }
 }

@@ -47,12 +47,13 @@ macro_rules! iowr {
 const KVM_IRQFD: libc::c_int = iow!(KVMIO, 0x76, kvm_bindings::kvm_irqfd);
 const KVM_SET_GSI_ROUTING: libc::c_int = iow!(KVMIO, 0x6a, kvm_bindings::kvm_irq_routing);
 const KVM_GET_GSI_ROUTING: libc::c_int = iowr!(KVMIO, 0x67, kvm_bindings::kvm_irq_routing);
+#[derive(Debug)]
 pub struct GpuIrqContext {
     pub trigger: EventFd,
     pub resample: EventFd,
     pub gsi: u32,
 }
-
+#[derive(Debug)]
 pub struct GpuPassthroughManager {
     pub pmthor: PmThorDevice,
     pub irqs: Vec<GpuIrqContext>,
@@ -207,21 +208,48 @@ impl GpuPassthroughManager {
         }
         Ok(())
     }
-    
+    pub fn detach_from_kvm(&self, vm_fd: &VmFd) -> io::Result<()> {
+        println!("GpuPassthrough: Detaching irqfds during VM shutdown...");
+
+        for ctx in &self.irqs {
+            // 普通 deassign
+            let _ = unsafe {
+                ioctl(vm_fd.as_raw_fd(), KVM_IRQFD, &kvm_irqfd {
+                    fd: ctx.trigger.as_raw_fd() as u32,
+                    gsi: ctx.gsi,
+                    flags: 0,
+                    ..Default::default()
+                })
+            };
+
+            // RESAMPLE deassign
+            let _ = unsafe {
+                ioctl(vm_fd.as_raw_fd(), KVM_IRQFD, &kvm_irqfd {
+                    fd: ctx.trigger.as_raw_fd() as u32,
+                    gsi: ctx.gsi,
+                    flags: KVM_IRQFD_FLAG_RESAMPLE,
+                    resamplefd: ctx.resample.as_raw_fd() as u32,
+                    ..Default::default()
+                })
+            };
+        }
+
+        // 给内核异步清理足够时间
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        Ok(())
+    }
     pub fn attach_to_kvm(&self, vm_fd: &VmFd) -> io::Result<()> {
         //self.setup_irq_routing(vm_fd)?;
+        self.pmthor.clean_irq();
         println!("GpuPassthrough: KVM GSI routing table updated.");
         let indices = [IrqIndex::Job, IrqIndex::Mmu, IrqIndex::Gpu];
 
         for (i, &index) in indices.iter().enumerate() {
             let ctx = &self.irqs[i];
 
-            // 1. 设置物理驱动：绑定物理中断到 eventfds
-            self.pmthor.set_trigger(index, ctx.trigger.as_raw_fd())?;
-            self.pmthor.set_unmask_event(index, ctx.resample.as_raw_fd())?;
 
-            // 2. 手动构造 kvm_irqfd 并调用 ioctl
-            // 这样可以绕过库的限制，传入 resamplefd
+            // 2. 手动构造 kvm_irqfd 调用 ioctl，绑定trigger eventfd和resample eventfd到irqfd
             let irqfd_data = kvm_irqfd {
                 fd: ctx.trigger.as_raw_fd() as u32,
                 gsi: ctx.gsi,
@@ -238,6 +266,9 @@ impl GpuPassthroughManager {
                 return Err(io::Error::last_os_error());
             }
 
+            // 1. 设置物理驱动：绑定物理中断到 eventfds
+            self.pmthor.set_trigger(index, ctx.trigger.as_raw_fd())?;
+            self.pmthor.set_unmask_event(index, ctx.resample.as_raw_fd())?;
             println!("GpuPassthrough: Attached IRQ {} (GSI {}) with Resample support", i, ctx.gsi);
         }
 
