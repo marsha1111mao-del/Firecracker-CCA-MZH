@@ -25,8 +25,8 @@ use super::{
 };
 use crate::devices::virtio::balloon::BalloonError;
 use crate::devices::virtio::device::{IrqTrigger, IrqType};
-use crate::devices::virtio::r#gen::virtio_blk::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::gen::virtio_blk::VIRTIO_F_VERSION_1;
+use crate::devices::virtio::r#gen::virtio_blk::VIRTIO_F_ACCESS_PLATFORM;
 use crate::logger::IncMetric;
 use crate::utils::u64_to_usize;
 use crate::vstate::memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryMmap};

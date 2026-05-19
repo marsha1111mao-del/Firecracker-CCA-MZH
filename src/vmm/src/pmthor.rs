@@ -1,8 +1,8 @@
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::os::fd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
-use std::io;
 
 // --- VFIO 协议常量 ---
 const VFIO_IRQ_SET_DATA_EVENTFD: u32 = 1 << 2;
@@ -12,7 +12,7 @@ const VFIO_IRQ_SET_ACTION_TRIGGER: u32 = 1 << 5;
 const VFIO_IRQ_CLEAN: u32 = 1 << 6;
 
 // 手动计算 IOCTL 码: _IOW('P', 0x01, VfioIrqSet) -> 0x40145001
-const PMTHOR_IOCTL_SET_IRQS:i32 = 0x40145001 as i32;
+const PMTHOR_IOCTL_SET_IRQS: i32 = 0x40145001 as i32;
 
 #[repr(u32)]
 #[derive(Clone, Copy)]
@@ -43,10 +43,7 @@ pub struct PmThorDevice {
 
 impl PmThorDevice {
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
         Ok(Self { file })
     }
 
@@ -62,9 +59,8 @@ impl PmThorDevice {
             fd,
         };
 
-        let ret = unsafe {
-            libc::ioctl(self.file.as_raw_fd(), PMTHOR_IOCTL_SET_IRQS, &payload.hdr)
-        };
+        let ret =
+            unsafe { libc::ioctl(self.file.as_raw_fd(), PMTHOR_IOCTL_SET_IRQS, &payload.hdr) };
 
         if ret < 0 {
             return Err(io::Error::last_os_error());
@@ -80,7 +76,7 @@ impl PmThorDevice {
         self.set_irq_raw(index, VFIO_IRQ_SET_ACTION_UNMASK, fd)
     }
 
-    pub fn clean_irq(&self)->io::Result<()>{
+    pub fn clean_irq(&self) -> io::Result<()> {
         self.set_irq_raw(IrqIndex::Mmu, VFIO_IRQ_CLEAN, 0)
     }
 }

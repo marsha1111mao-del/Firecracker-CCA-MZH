@@ -32,6 +32,8 @@ pub mod mmds;
 pub mod net;
 /// Wrapper for configuring microVM snapshots and the microVM state.
 pub mod snapshot;
+/// Wrapper for configuring broker-backed shared memory windows.
+pub mod vmshm;
 /// Wrapper for configuring the vsock devices attached to the microVM.
 pub mod vsock;
 

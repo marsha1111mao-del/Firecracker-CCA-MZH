@@ -763,9 +763,14 @@ mod tests {
             (GuestAddress(0x10000), region_size),
         ];
 
-        let guest_memory =
-            GuestMemoryMmap::create(regions.into_iter(), libc::MAP_PRIVATE, Some(file), false, None)
-                .unwrap();
+        let guest_memory = GuestMemoryMmap::create(
+            regions.into_iter(),
+            libc::MAP_PRIVATE,
+            Some(file),
+            false,
+            None,
+        )
+        .unwrap();
 
         vuh.update_mem_table(&guest_memory).unwrap();
 
@@ -879,9 +884,14 @@ mod tests {
         file.set_len(region_size as u64).unwrap();
         let regions = vec![(GuestAddress(0x0), region_size)];
 
-        let guest_memory =
-            GuestMemoryMmap::create(regions.into_iter(), libc::MAP_PRIVATE, Some(file), false, None)
-                .unwrap();
+        let guest_memory = GuestMemoryMmap::create(
+            regions.into_iter(),
+            libc::MAP_PRIVATE,
+            Some(file),
+            false,
+            None,
+        )
+        .unwrap();
 
         let mut queue = Queue::new(69);
         queue.initialize(&guest_memory).unwrap();

@@ -10,20 +10,19 @@ use std::fmt::Debug;
 use std::io;
 use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-
+use crate::devices::legacy::EventFdTrigger;
+use crate::logger::{IncMetric, SharedIncMetric};
 use event_manager::{EventOps, Events, MutEventSubscriber};
 use log::{error, warn};
 use serde::Serialize;
 use vm_superio::serial::{Error as SerialError, SerialEvents};
 use vm_superio::{Serial, Trigger};
 use vmm_sys_util::epoll::EventSet;
-use crate::devices::legacy::EventFdTrigger;
-use crate::logger::{IncMetric, SharedIncMetric};
 
 /// Received Data Available interrupt - for letting the driver know that
 /// there is some pending data to be processed.
@@ -158,7 +157,7 @@ pub struct BufferedStdout {
 
 impl BufferedStdout {
     /// 创建一个新的 BufferedStdout 实例。
-    pub fn new(stdout :std::io::Stdout) -> Self {
+    pub fn new(stdout: std::io::Stdout) -> Self {
         let capacity = 8192;
         let flush_interval = Duration::from_millis(20);
         let buffer = Arc::new(Mutex::new(Vec::with_capacity(capacity)));
@@ -169,7 +168,6 @@ impl BufferedStdout {
 
         // 启动后台I/O线程
         let io_thread_handle = thread::spawn(move || {
-            
             // 只要 shutdown 标志为 false，就持续运行
             while !shutdown_clone.load(Ordering::Relaxed) {
                 // 等待指定间隔
@@ -233,13 +231,13 @@ impl Drop for BufferedStdout {
         if let Some(handle) = self.io_thread_handle.take() {
             handle.join().expect("I/O thread panicked");
         }
-        
+
         // 3. (可选但推荐) 在线程退出后，再做一次最终的刷新，
         //    防止有数据在最后一次循环检查和线程退出之间写入。
         let final_data = self.buffer.lock().unwrap();
         if !final_data.is_empty() {
-             io::stdout().lock().write_all(&final_data).ok();
-             io::stdout().lock().flush().ok();
+            io::stdout().lock().write_all(&final_data).ok();
+            io::stdout().lock().flush().ok();
         }
     }
 }

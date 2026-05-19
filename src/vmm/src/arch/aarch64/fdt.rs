@@ -4,20 +4,21 @@
 // Portions Copyright 2017 The Chromium OS Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the THIRD-PARTY file.
-use std::collections::HashMap;
-use std::ffi::CString;
-use std::fmt::Debug;
-use log::info;
-use vm_fdt::{Error as VmFdtError, FdtWriter, FdtWriterNode};
-use vm_memory::GuestMemoryError;
 use super::super::{DeviceType, InitrdConfig};
 use super::cache_info::{read_cache_config, CacheEntry};
 use super::gic::GICDevice;
 use crate::devices::acpi::vmgenid::{VmGenId, VMGENID_MEM_SIZE};
+use crate::vmshm::VmshmFdtInfo;
 use crate::vstate::memory::{Address, GuestMemory, GuestMemoryMmap};
- use std::fs;
- use std::io::Write;
- use std::path::PathBuf;
+use log::info;
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::fmt::Debug;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use vm_fdt::{Error as VmFdtError, FdtWriter, FdtWriterNode};
+use vm_memory::GuestMemoryError;
 
 // This is a value for uniquely identifying the FDT node declaring the interrupt controller.
 const GIC_PHANDLE: u32 = 1;
@@ -73,6 +74,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     gic_device: &GICDevice,
     vmgenid: &Option<VmGenId>,
     initrd: &Option<InitrdConfig>,
+    vmshm: &[VmshmFdtInfo],
 ) -> Result<Vec<u8>, FdtError> {
     // Allocate stuff necessary for storing the blob.
     let mut fdt_writer = FdtWriter::new()?;
@@ -101,6 +103,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     create_psci_node(&mut fdt_writer)?;
     create_devices_node(&mut fdt_writer, device_info)?;
     create_vmgenid_node(&mut fdt_writer, vmgenid)?;
+    create_vmshm_nodes(&mut fdt_writer, vmshm)?;
 
     create_gpu_node(&mut fdt_writer)?;
     // End Header node.
@@ -108,8 +111,12 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     // Allocate another buffer so we can format and then write fdt to guest.
     let fdt_final = fdt_writer.finish()?;
 
-    let path=PathBuf::from("/root/GPU-SFTP/");
-    let mut output=fs::OpenOptions::new().write(true).create(true).open(path.join("firecracker.dtb")).unwrap();
+    let path = PathBuf::from("/root/GPU-SFTP/");
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open(path.join("firecracker.dtb"))
+        .unwrap();
     output.write_all(&fdt_final).unwrap();
 
     Ok(fdt_final)
@@ -242,12 +249,30 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
         - super::layout::RESERVERD_MEM_SIZE
         + 1;
     let mem_reg_prop = &[
-        super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE+ super::layout::RESERVERD_MEM_SIZE,
+        super::layout::DRAM_MEM_START
+            + super::layout::SYSTEM_MEM_SIZE
+            + super::layout::RESERVERD_MEM_SIZE,
         mem_size,
     ];
-    assert!((super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE+ super::layout::RESERVERD_MEM_SIZE) % 0x20_0000 == 0, "memory_start must be 2MB-aligned");
-    assert!(&mem_size % 0x20_0000 == 0, "memory_size must be 2MB-aligned");
-    info!("Memory start:{:#x}\n Memory size:{:#x}\n",super::layout::DRAM_MEM_START + super::layout::SYSTEM_MEM_SIZE+ super::layout::RESERVERD_MEM_SIZE,&mem_size);
+    assert!(
+        (super::layout::DRAM_MEM_START
+            + super::layout::SYSTEM_MEM_SIZE
+            + super::layout::RESERVERD_MEM_SIZE)
+            % 0x20_0000
+            == 0,
+        "memory_start must be 2MB-aligned"
+    );
+    assert!(
+        &mem_size % 0x20_0000 == 0,
+        "memory_size must be 2MB-aligned"
+    );
+    info!(
+        "Memory start:{:#x}\n Memory size:{:#x}\n",
+        super::layout::DRAM_MEM_START
+            + super::layout::SYSTEM_MEM_SIZE
+            + super::layout::RESERVERD_MEM_SIZE,
+        &mem_size
+    );
     let mem = fdt.begin_node("memory@ram")?;
     fdt.property_string("device_type", "memory")?;
     fdt.property_array_u64("reg", mem_reg_prop)?;
@@ -255,6 +280,19 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
 
     Ok(())
 }
+
+fn create_vmshm_nodes(fdt: &mut FdtWriter, vmshm: &[VmshmFdtInfo]) -> Result<(), FdtError> {
+    for window in vmshm {
+        let node_name = format!("vmshm@{:x}", window.guest_phys_addr);
+        let node = fdt.begin_node(&node_name)?;
+        fdt.property_string("compatible", "vmshm")?;
+        fdt.property_array_u64("reg", &[window.guest_phys_addr, window.size])?;
+        fdt.end_node(node)?;
+    }
+
+    Ok(())
+}
+
 fn create_gpu_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
     let gpu_node = fdt.begin_node("gpu@fb000000")?;
 
@@ -264,7 +302,7 @@ fn create_gpu_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
 
     // reg: base = 0x0_fb000000, size = 0x0_200000
     // 正确格式：4个 u32: <addr_hi addr_low size_hi size_low>
-    // 
+    //
     // 地址 0xfb000000 (高位0x00, 低位0xfb000000)
     // 大小 0x200000   (高位0x00, 低位0x00200000)
     fdt.property_array_u32(
@@ -274,7 +312,7 @@ fn create_gpu_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
             0x00, 0x00200000, // Size: 0x0000200000
         ],
     )?;
-    
+
     // // clocks: 三个都指向同一个 apb-pclk (phandle = 2)
     // const CLOCK_PHANDLE: u32 = 0x02; // 假设 phandle 0x02 是 apb-pclk
     // fdt.property_array_u32("clocks", &[CLOCK_PHANDLE, CLOCK_PHANDLE, CLOCK_PHANDLE])?;
@@ -284,9 +322,15 @@ fn create_gpu_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
     // fdt.property("clock-names", clock_names)?;
 
     let interrupts = [
-        GIC_FDT_IRQ_TYPE_SPI, 92, IRQ_TYPE_LEVEL_HI,
-        GIC_FDT_IRQ_TYPE_SPI, 93, IRQ_TYPE_LEVEL_HI,
-        GIC_FDT_IRQ_TYPE_SPI, 94, IRQ_TYPE_LEVEL_HI,
+        GIC_FDT_IRQ_TYPE_SPI,
+        92,
+        IRQ_TYPE_LEVEL_HI,
+        GIC_FDT_IRQ_TYPE_SPI,
+        93,
+        IRQ_TYPE_LEVEL_HI,
+        GIC_FDT_IRQ_TYPE_SPI,
+        94,
+        IRQ_TYPE_LEVEL_HI,
     ];
     fdt.property_array_u32("interrupts", &interrupts)?;
 
@@ -301,14 +345,22 @@ fn create_gpu_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
     Ok(())
 }
 
-
-pub fn create_reserverd_memory_node(fdt: &mut FdtWriter, _guest_mem: &GuestMemoryMmap) -> Result<(), FdtError> {
+pub fn create_reserverd_memory_node(
+    fdt: &mut FdtWriter,
+    _guest_mem: &GuestMemoryMmap,
+) -> Result<(), FdtError> {
     let reserved_mem_size = super::layout::RESERVERD_MEM_SIZE;
     let reserved_mem_start = super::layout::RESERVERD_MEM_START;
 
     // 检查对齐
-    assert!(reserved_mem_start % 0x20_0000 == 0, "reserved_start must be 2MB-aligned");
-    assert!(reserved_mem_size % 0x20_0000 == 0, "reserved_size must be 2MB-aligned");
+    assert!(
+        reserved_mem_start % 0x20_0000 == 0,
+        "reserved_start must be 2MB-aligned"
+    );
+    assert!(
+        reserved_mem_size % 0x20_0000 == 0,
+        "reserved_size must be 2MB-aligned"
+    );
 
     // 1. 开始构建 /reserved-memory 节点
     let reserved_mem = fdt.begin_node("reserved-memory")?;
@@ -323,18 +375,14 @@ pub fn create_reserverd_memory_node(fdt: &mut FdtWriter, _guest_mem: &GuestMemor
     // 【修正点】: reg 属性应该只包含两个 u64 (addr, size)。
     // property_array_u64 会将每个 u64 拆分为两个 u32 (hi, lo) 写入 FDT，
     // 最终生成 16 字节数据 <addr_hi addr_lo size_hi size_lo>，符合 #address-cells=2, #size-cells=2。
-    let reserved_mem_reg_prop = &[
-        reserved_mem_start,
-        reserved_mem_size,
-    ];
+    let reserved_mem_reg_prop = &[reserved_mem_start, reserved_mem_size];
 
     fdt.property_string("compatible", "shared-dma-pool")?;
-    fdt.property_null("no-map")?; 
+    fdt.property_null("no-map")?;
     fdt.property_array_u64("reg", reserved_mem_reg_prop)?;
-    
-    
+
     fdt.end_node(reserved_region)?; // end reserved_region
-    fdt.end_node(reserved_mem)?;    // end reserved-memory
+    fdt.end_node(reserved_mem)?; // end reserved-memory
     Ok(())
 }
 
@@ -449,7 +497,7 @@ fn create_psci_node(fdt: &mut FdtWriter) -> Result<(), FdtError> {
     // Two methods available: hvc and smc.
     // As per documentation, PSCI calls between a guest and hypervisor may use the HVC conduit
     // instead of SMC. So, since we are using kvm, we need to use hvc.
-    
+
     fdt.property_string("method", "smc")?;
     fdt.end_node(psci)?;
 
@@ -519,7 +567,7 @@ fn create_devices_node<T: DeviceInfoForFDT + Clone + Debug, S: std::hash::BuildH
 ) -> Result<(), FdtError> {
     // Create one temp Vec to store all virtio devices
     let mut ordered_virtio_device: Vec<&T> = Vec::new();
-    info!("dev_info:{:?}\n",&dev_info);
+    info!("dev_info:{:?}\n", &dev_info);
     for ((device_type, _device_id), info) in dev_info {
         match device_type {
             DeviceType::BootTimer => (), // since it's not a real device
@@ -616,6 +664,7 @@ mod tests {
             &gic,
             &None,
             &None,
+            &[],
         )
         .unwrap();
     }
@@ -636,6 +685,7 @@ mod tests {
             &gic,
             &Some(vmgenid),
             &None,
+            &[],
         )
         .unwrap();
     }
@@ -661,6 +711,7 @@ mod tests {
             &gic,
             &None,
             &None,
+            &[],
         )
         .unwrap();
 
@@ -723,6 +774,7 @@ mod tests {
             &gic,
             &None,
             &Some(initrd),
+            &[],
         )
         .unwrap();
 

@@ -23,6 +23,7 @@ pub use self::fdt::DeviceInfoForFDT;
 use self::gic::GICDevice;
 use crate::arch::DeviceType;
 use crate::devices::acpi::vmgenid::VmGenId;
+use crate::vmshm::VmshmFdtInfo;
 use crate::vstate::memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
 /// Errors thrown while configuring aarch64 system.
@@ -59,6 +60,7 @@ pub fn arch_memory_regions(size: usize) -> Vec<(GuestAddress, usize)> {
 /// * `device_info` - A hashmap containing the attached devices for building FDT device nodes.
 /// * `gic_device` - The GIC device.
 /// * `initrd` - Information about an optional initrd.
+/// * `vmshm` - Broker-backed shared memory windows to expose in the FDT.
 pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
     guest_mem: &GuestMemoryMmap,
     cmdline_cstring: CString,
@@ -67,6 +69,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
     gic_device: &GICDevice,
     vmgenid: &Option<VmGenId>,
     initrd: &Option<super::InitrdConfig>,
+    vmshm: &[VmshmFdtInfo],
 ) -> Result<(), ConfigurationError> {
     println!("create_fdt");
     let fdt = fdt::create_fdt(
@@ -77,6 +80,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
         gic_device,
         vmgenid,
         initrd,
+        vmshm,
     )?;
     let fdt_address = GuestAddress(get_fdt_addr(guest_mem));
     guest_mem
@@ -87,7 +91,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
 
 /// Returns the memory address where the kernel could be loaded.
 pub fn get_kernel_start() -> u64 {
-    layout::SYSTEM_MEM_START + layout::SYSTEM_MEM_SIZE+layout::RESERVERD_MEM_SIZE
+    layout::SYSTEM_MEM_START + layout::SYSTEM_MEM_SIZE + layout::RESERVERD_MEM_SIZE
 }
 
 /// Returns the memory address where the initrd could be loaded.

@@ -69,10 +69,15 @@ pub fn create_vmm(
     let vm_config = MachineConfig {
         mem_size_mib: 2048,
         vcpu_count: 1,
-        realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
+        realm_config: Some(RealmConfig::new(
+            Some("SHA256".to_string()),
+            Some([0u8; 64]),
+        )),
         ..Default::default()
     };
-    let mock_vm_res = MockVmResources::new().with_boot_source(boot_source_cfg).with_vm_config(vm_config);
+    let mock_vm_res = MockVmResources::new()
+        .with_boot_source(boot_source_cfg)
+        .with_vm_config(vm_config);
     let mut resources: VmResources = if is_diff {
         mock_vm_res
             .with_vm_config(MockVmConfig::new().with_dirty_page_tracking().into())

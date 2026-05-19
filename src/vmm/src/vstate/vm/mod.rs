@@ -9,9 +9,12 @@ use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::ptr;
 
-use kvm_bindings::{kvm_create_guest_memfd, kvm_userspace_memory_region, kvm_userspace_memory_region2, KVM_MEM_GUEST_MEMFD, KVM_MEM_LOG_DIRTY_PAGES, KVM_VM_TYPE_ARM_NORMAL, KVM_VM_TYPE_ARM_REALM};
+use kvm_bindings::{
+    kvm_create_guest_memfd, kvm_userspace_memory_region, kvm_userspace_memory_region2,
+    KVM_MEM_GUEST_MEMFD, KVM_MEM_LOG_DIRTY_PAGES, KVM_VM_TYPE_ARM_NORMAL, KVM_VM_TYPE_ARM_REALM,
+};
 use kvm_ioctls::{Cap, VmFd};
-use libc::{MAP_SHARED, PROT_READ, PROT_WRITE, off_t};
+use libc::{off_t, MAP_SHARED, PROT_READ, PROT_WRITE};
 use vm_memory::guest_memory;
 use vmm_sys_util::eventfd::EventFd;
 
@@ -55,14 +58,20 @@ pub enum VmError {
 /// Contains Vm functions that are usable across CPU architectures
 impl Vm {
     #[cfg(all(target_arch = "aarch64", feature = "rme"))]
-    fn create_vm(kvm: &crate::vstate::kvm::Kvm, machine_config: MachineConfig) -> Result<VmFd, VmError> {
+    fn create_vm(
+        kvm: &crate::vstate::kvm::Kvm,
+        machine_config: MachineConfig,
+    ) -> Result<VmFd, VmError> {
         let vm_type = if machine_config.realm_config.is_some() {
             KVM_VM_TYPE_ARM_REALM
         } else {
             KVM_VM_TYPE_ARM_NORMAL
         };
 
-        let ipa_size = u64::BITS - (layout::DRAM_MEM_START + ((machine_config.mem_size_mib as u64) << 20)).leading_zeros() + 1;
+        let ipa_size = u64::BITS
+            - (layout::DRAM_MEM_START + ((machine_config.mem_size_mib as u64) << 20))
+                .leading_zeros()
+            + 1;
         if kvm.fd.check_extension(Cap::ArmVmIPASize) {
             let max_ipa_size = kvm.fd.get_host_ipa_limit();
             if ipa_size > max_ipa_size as u32 {
@@ -75,7 +84,7 @@ impl Vm {
         }
 
         println!("ipa_bit_shift: {ipa_bit_shift}");
-        
+
         // It is known that KVM_CREATE_VM occasionally fails with EINTR on heavily loaded machines
         // with many VMs.
         //
@@ -112,7 +121,10 @@ impl Vm {
     }
 
     #[cfg(not(all(target_arch = "aarch64", feature = "rme")))]
-    fn create_vm(kvm: &crate::vstate::kvm::Kvm, machine_config: MachineConfig) -> Result<VmFd, VmError> {
+    fn create_vm(
+        kvm: &crate::vstate::kvm::Kvm,
+        machine_config: MachineConfig,
+    ) -> Result<VmFd, VmError> {
         // It is known that KVM_CREATE_VM occasionally fails with EINTR on heavily loaded machines
         // with many VMs.
         //
@@ -173,16 +185,15 @@ impl Vm {
         self.set_kvm_memory_regions2(guest_mem)
     }
 
-    pub(crate) fn create_guest_memfd(
-        &self,
-        mem_size_mib: usize,
-    ) -> Result<File, VmError> { 
+    pub(crate) fn create_guest_memfd(&self, mem_size_mib: usize) -> Result<File, VmError> {
         let kvm_create_guest_memfd_args = kvm_create_guest_memfd {
-          size: (mem_size_mib << 20) as u64,
+            size: (mem_size_mib << 20) as u64,
             ..Default::default()
         };
         // SAFETY: Safe because the fd is a valid KVM file descriptor.
-        let raw_fd = self.fd.create_guest_memfd(kvm_create_guest_memfd_args)
+        let raw_fd = self
+            .fd
+            .create_guest_memfd(kvm_create_guest_memfd_args)
             .map_err(VmError::CreateGuestMemFd)?;
         // SAFETY: Safe because create_guest_memfd() already checked the fd.
         unsafe { Ok(File::from_raw_fd(raw_fd)) }
@@ -240,8 +251,10 @@ impl Vm {
                 };
                 if region.guest_memfd_file_offset().is_some() {
                     memory_region2.flags |= KVM_MEM_GUEST_MEMFD;
-                    memory_region2.guest_memfd = region.guest_memfd_file_offset().unwrap().file().as_raw_fd() as u32;
-                    memory_region2.guest_memfd_offset = region.guest_memfd_file_offset().unwrap().start();
+                    memory_region2.guest_memfd =
+                        region.guest_memfd_file_offset().unwrap().file().as_raw_fd() as u32;
+                    memory_region2.guest_memfd_offset =
+                        region.guest_memfd_file_offset().unwrap().start();
                 }
 
                 // SAFETY: Safe because the fd is a valid KVM file descriptor.
@@ -285,10 +298,13 @@ pub(crate) mod tests {
     #[test]
     fn test_new() {
         // Testing with a valid /dev/kvm descriptor.
-    let vm_config = MachineConfig {
-        realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
-        ..Default::default()
-    };
+        let vm_config = MachineConfig {
+            realm_config: Some(RealmConfig::new(
+                Some("SHA256".to_string()),
+                Some([0u8; 64]),
+            )),
+            ..Default::default()
+        };
         let kvm = Kvm::new(vec![]).expect("Cannot create Kvm");
         Vm::new(&kvm, vm_config).unwrap();
     }

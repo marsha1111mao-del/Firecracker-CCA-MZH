@@ -15,12 +15,12 @@ use vmm_sys_util::eventfd::EventFd;
 use super::{VhostUserBlockError, NUM_QUEUES, QUEUE_SIZE};
 use crate::devices::virtio::block::CacheType;
 use crate::devices::virtio::device::{DeviceState, IrqTrigger, IrqType, VirtioDevice};
-use crate::devices::virtio::r#gen::virtio_blk::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::gen::virtio_blk::{
     VIRTIO_BLK_F_FLUSH, VIRTIO_BLK_F_RO, VIRTIO_F_VERSION_1,
 };
 use crate::devices::virtio::gen::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use crate::devices::virtio::queue::Queue;
+use crate::devices::virtio::r#gen::virtio_blk::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::vhost_user::{VhostUserHandleBackend, VhostUserHandleImpl};
 use crate::devices::virtio::vhost_user_metrics::{
     VhostUserDeviceMetrics, VhostUserMetricsPerDevice,
@@ -342,7 +342,7 @@ impl<T: VhostUserHandleBackend + Send + 'static> VirtioDevice for VhostUserBlock
         let start_time = get_time_us(ClockType::Monotonic);
         // Setting features again, because now we negotiated them
         // with guest driver as well.
-        let mut masked_features=self.acked_features;
+        let mut masked_features = self.acked_features;
         masked_features &= !(1u64 << VIRTIO_F_ACCESS_PLATFORM);
         self.vu_handle
             .set_features(masked_features)
@@ -783,9 +783,14 @@ mod tests {
         let file = TempFile::new().unwrap().into_file();
         file.set_len(region_size as u64).unwrap();
         let regions = vec![(GuestAddress(0x0), region_size)];
-        let guest_memory =
-            GuestMemoryMmap::create(regions.into_iter(), libc::MAP_PRIVATE, Some(file), false, None)
-                .unwrap();
+        let guest_memory = GuestMemoryMmap::create(
+            regions.into_iter(),
+            libc::MAP_PRIVATE,
+            Some(file),
+            false,
+            None,
+        )
+        .unwrap();
 
         // During actiavion of the device features, memory and queues should be set and activated.
         vhost_block.activate(guest_memory).unwrap();

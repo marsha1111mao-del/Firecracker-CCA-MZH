@@ -17,7 +17,6 @@ use vmm_sys_util::eventfd::EventFd;
 use super::NET_QUEUE_MAX_SIZE;
 use crate::devices::virtio::device::{DeviceState, IrqTrigger, IrqType, VirtioDevice};
 use crate::devices::virtio::gen::virtio_blk::VIRTIO_F_VERSION_1;
-use crate::devices::virtio::r#gen::virtio_net::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::gen::virtio_net::{
     virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4,
     VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4,
@@ -33,6 +32,7 @@ use crate::devices::virtio::net::{
     gen, NetError, NetQueue, MAX_BUFFER_SIZE, NET_QUEUE_SIZES, RX_INDEX, TX_INDEX,
 };
 use crate::devices::virtio::queue::{DescriptorChain, Queue};
+use crate::devices::virtio::r#gen::virtio_net::VIRTIO_F_ACCESS_PLATFORM;
 use crate::devices::virtio::{ActivateError, TYPE_NET};
 use crate::devices::{report_net_event_fail, DeviceError};
 use crate::dumbo::pdu::arp::ETH_IPV4_FRAME_LEN;

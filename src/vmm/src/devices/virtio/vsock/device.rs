@@ -48,8 +48,9 @@ pub(crate) const VIRTIO_VSOCK_EVENT_TRANSPORT_RESET: u32 = 0;
 /// - VIRTIO_F_VERSION_1: the device conforms to at least version 1.0 of the VirtIO spec.
 /// - VIRTIO_F_IN_ORDER: the device returns used buffers in the same order that the driver makes
 ///   them available.
-pub(crate) const AVAIL_FEATURES: u64 =
-    1 << uapi::VIRTIO_F_VERSION_1 as u64 | 1 << uapi::VIRTIO_F_IN_ORDER as u64 | 1u64 << uapi::VIRTIO_F_ACCESS_PLATFORM;
+pub(crate) const AVAIL_FEATURES: u64 = 1 << uapi::VIRTIO_F_VERSION_1 as u64
+    | 1 << uapi::VIRTIO_F_IN_ORDER as u64
+    | 1u64 << uapi::VIRTIO_F_ACCESS_PLATFORM;
 
 /// Structure representing the vsock device.
 #[derive(Debug)]

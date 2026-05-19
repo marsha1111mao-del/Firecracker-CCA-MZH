@@ -13,7 +13,10 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Barrier, Mutex};
 use std::{fmt, io, thread};
 
-use kvm_bindings::{kvm_memory_attributes, KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_MEMORY_EXIT_FLAG_PRIVATE, KVM_SYSTEM_EVENT_RESET, KVM_SYSTEM_EVENT_SHUTDOWN};
+use kvm_bindings::{
+    kvm_memory_attributes, KVM_MEMORY_ATTRIBUTE_PRIVATE, KVM_MEMORY_EXIT_FLAG_PRIVATE,
+    KVM_SYSTEM_EVENT_RESET, KVM_SYSTEM_EVENT_SHUTDOWN,
+};
 use kvm_ioctls::VcpuExit;
 #[cfg(feature = "gdb")]
 use kvm_ioctls::VcpuFd;
@@ -534,7 +537,11 @@ impl Vcpu {
 
                 Ok(VcpuEmulation::Paused)
             }
-            emulation_result => handle_kvm_exit(&mut self.kvm_vcpu.peripherals, emulation_result, self.vmm.as_ref().unwrap().clone()),
+            emulation_result => handle_kvm_exit(
+                &mut self.kvm_vcpu.peripherals,
+                emulation_result,
+                self.vmm.as_ref().unwrap().clone(),
+            ),
         }
     }
 }
@@ -587,8 +594,11 @@ fn handle_kvm_exit(
             }
             VcpuExit::MemoryFault(flag, gpa, size) => {
                 //
-                if flag!=0 {
-                    vmm.lock().unwrap().guest_memory.unmap_guest_range(GuestAddress(gpa),size as usize);
+                if flag != 0 {
+                    vmm.lock()
+                        .unwrap()
+                        .guest_memory
+                        .unmap_guest_range(GuestAddress(gpa), size as usize);
                 }
                 METRICS.vcpu.failures.inc();
                 let set_mem_attributes_args = kvm_memory_attributes {
@@ -601,9 +611,17 @@ fn handle_kvm_exit(
                     },
                     ..Default::default()
                 };
-                vmm.lock().unwrap().vm.fd().set_memory_attributes(set_mem_attributes_args).map_err(VcpuError::SetMemoryAttributes)?;
-                if flag==0{
-                    vmm.lock().unwrap().guest_memory.map_guest_range(GuestAddress(gpa),size as usize);
+                vmm.lock()
+                    .unwrap()
+                    .vm
+                    .fd()
+                    .set_memory_attributes(set_mem_attributes_args)
+                    .map_err(VcpuError::SetMemoryAttributes)?;
+                if flag == 0 {
+                    vmm.lock()
+                        .unwrap()
+                        .guest_memory
+                        .map_guest_range(GuestAddress(gpa), size as usize);
                 }
                 Ok(VcpuEmulation::Handled)
             }
@@ -855,7 +873,11 @@ pub(crate) mod tests {
             )
         );
 
-        let res = handle_kvm_exit(&mut vcpu.kvm_vcpu.peripherals, Ok(VcpuExit::InternalError), vmm);
+        let res = handle_kvm_exit(
+            &mut vcpu.kvm_vcpu.peripherals,
+            Ok(VcpuExit::InternalError),
+            vmm,
+        );
         assert_eq!(
             format!("{:?}", res.unwrap_err()),
             format!(

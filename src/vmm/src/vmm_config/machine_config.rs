@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::fmt::Debug;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use base64::prelude::*;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::cpu_config::templates::{CpuTemplateType, CustomCpuTemplate, StaticCpuTemplate};
 
@@ -90,7 +90,6 @@ impl From<HugePageConfig> for Option<memfd::HugetlbSize> {
     }
 }
 
-
 /// Personalization value for the realm.
 #[derive(Copy, Debug, PartialEq, Eq)]
 pub struct PersonalizationValue {
@@ -127,7 +126,9 @@ impl<'de> Deserialize<'de> for PersonalizationValue {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        let value = BASE64_STANDARD.decode(value).map_err(serde::de::Error::custom)?;
+        let value = BASE64_STANDARD
+            .decode(value)
+            .map_err(serde::de::Error::custom)?;
         let mut result = [0; 64usize];
         result.copy_from_slice(&value);
         Ok(PersonalizationValue { value: result })
@@ -429,13 +430,22 @@ mod tests {
         #[cfg(all(target_arch = "aarch64", feature = "rme"))]
         {
             let mconfig = MachineConfig {
-                realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
+                realm_config: Some(RealmConfig::new(
+                    Some("SHA256".to_string()),
+                    Some([0u8; 64]),
+                )),
                 ..Default::default()
             };
             let serialized = serde_json::to_string(&mconfig).unwrap();
             let deserialized = serde_json::from_str::<MachineConfig>(&serialized).unwrap();
 
-            assert_eq!(deserialized.realm_config, Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))));
+            assert_eq!(
+                deserialized.realm_config,
+                Some(RealmConfig::new(
+                    Some("SHA256".to_string()),
+                    Some([0u8; 64])
+                ))
+            );
         }
     }
 }

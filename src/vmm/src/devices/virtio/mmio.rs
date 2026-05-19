@@ -71,9 +71,9 @@ impl MmioTransport {
     ) -> MmioTransport {
         let interrupt_status = device.lock().expect("Poisoned lock").interrupt_status();
 
-        let is_pkvm = mem.iter().any(|region| {
-            (*region).guest_memfd_file_offset().is_some()
-        });
+        let is_pkvm = mem
+            .iter()
+            .any(|region| (*region).guest_memfd_file_offset().is_some());
         MmioTransport {
             device,
             features_select: 0,
@@ -84,7 +84,7 @@ impl MmioTransport {
             mem,
             interrupt_status,
             is_vhost_user,
-            is_pkvm
+            is_pkvm,
         }
     }
 

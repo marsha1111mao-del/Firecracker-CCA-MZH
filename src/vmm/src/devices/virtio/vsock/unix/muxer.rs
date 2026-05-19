@@ -37,11 +37,6 @@ use std::io::{Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use libc::VMADDR_CID_HOST;
-use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
-use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
-use std::fs::File;
 use super::super::csm::ConnState;
 use super::super::defs::uapi;
 use super::super::{VsockBackend, VsockChannel, VsockEpollListener, VsockError};
@@ -51,6 +46,11 @@ use super::{defs, MuxerConnection, VsockUnixBackendError};
 use crate::devices::virtio::vsock::metrics::METRICS;
 use crate::devices::virtio::vsock::packet::{VsockPacketRx, VsockPacketTx};
 use crate::logger::IncMetric;
+use libc::VMADDR_CID_HOST;
+use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use vmm_sys_util::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 const CID_UDS_JSON: &str = "/tmp/cid_uds_map.json";
 const CID_UDS_LOCK: &str = "/tmp/cid_uds_map.json.lock";
 
@@ -74,7 +74,9 @@ fn lock_shared(fd: RawFd) -> std::io::Result<()> {
 }
 
 fn unlock(fd: RawFd) {
-    unsafe { libc::flock(fd, libc::LOCK_UN); }
+    unsafe {
+        libc::flock(fd, libc::LOCK_UN);
+    }
 }
 
 // -----------------------
@@ -106,8 +108,7 @@ impl CidUdsMap {
             .map_err(VsockError::VsockCidMapUds)?;
 
         // 加读锁
-        lock_shared(lock_file.as_raw_fd())
-            .map_err(VsockError::VsockCidMapUds)?;
+        lock_shared(lock_file.as_raw_fd()).map_err(VsockError::VsockCidMapUds)?;
 
         // 读取 JSON 文件
         let result = match File::open(CID_UDS_JSON) {
@@ -118,12 +119,15 @@ impl CidUdsMap {
 
                 match serde_json::from_str(&content) {
                     Ok(json) => Ok(json),
-                    Err(e) => Err(VsockError::VsockCidMapUds(
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-                    )),
+                    Err(e) => Err(VsockError::VsockCidMapUds(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        e,
+                    ))),
                 }
             }
-            Err(_) => Ok(Self { mappings: HashMap::new() }),
+            Err(_) => Ok(Self {
+                mappings: HashMap::new(),
+            }),
         };
 
         // 解锁
@@ -131,7 +135,6 @@ impl CidUdsMap {
 
         result
     }
-
 
     /// Insert or update cid → uds
     pub fn insert(&mut self, cid: u64, uds: String) {
@@ -148,28 +151,23 @@ impl CidUdsMap {
             .map_err(VsockError::VsockCidMapUds)?;
 
         // 加写锁
-        lock_exclusive(lock_file.as_raw_fd())
-            .map_err(VsockError::VsockCidMapUds)?;
+        lock_exclusive(lock_file.as_raw_fd()).map_err(VsockError::VsockCidMapUds)?;
 
         // 序列化
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| VsockError::VsockCidMapUds(
-                std::io::Error::new(std::io::ErrorKind::InvalidData, e))
-            )?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            VsockError::VsockCidMapUds(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
 
         // 原子写：写到临时文件，再 rename
         let tmp_path = format!("{}.tmp", CID_UDS_JSON);
-        std::fs::write(&tmp_path, json)
-            .map_err(VsockError::VsockCidMapUds)?;
-        std::fs::rename(&tmp_path, CID_UDS_JSON)
-            .map_err(VsockError::VsockCidMapUds)?;
+        std::fs::write(&tmp_path, json).map_err(VsockError::VsockCidMapUds)?;
+        std::fs::rename(&tmp_path, CID_UDS_JSON).map_err(VsockError::VsockCidMapUds)?;
 
         // 解锁
         unlock(lock_file.as_raw_fd());
 
         Ok(())
     }
-
 
     /// Helper to load → update → save
     pub fn update(cid: u64, uds: String) -> Result<(), VsockError> {
@@ -179,7 +177,6 @@ impl CidUdsMap {
         Ok(())
     }
 }
-
 
 /// A unique identifier of a `MuxerConnection` object. Connections are stored in a hash map,
 /// keyed by a `ConnMapKey` object.
@@ -454,7 +451,7 @@ impl VsockMuxer {
             local_port_last: (1u32 << 30) - 1,
             local_port_set: HashSet::with_capacity(defs::MAX_CONNECTIONS),
         };
-  
+
         // Listen on the host initiated socket, for incoming connections.
         muxer.add_listener(muxer.host_sock.as_raw_fd(), EpollListener::HostSock)?;
         Ok(muxer)
@@ -772,8 +769,8 @@ impl VsockMuxer {
             // get a stream connect to dst_guest
             // use stream instead of host stream to create a peer-init connection
             CidUdsMap::load().unwrap();
-            let dst_uds_path=CidUdsMap::get(dst_cid as u64).unwrap();
-            info!("peer request to uds {}\n",&dst_uds_path);
+            let dst_uds_path = CidUdsMap::get(dst_cid as u64).unwrap();
+            info!("peer request to uds {}\n", &dst_uds_path);
             //let dst_vsock_path = format!("/tmp/v{}sock", pkt.hdr.dst_cid());
             let command = format!("connect {}\n", pkt.hdr.dst_port());
             let mut accept_buf = [0u8; 1024];

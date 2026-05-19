@@ -4,33 +4,6 @@
 //! Enables pre-boot setup, instantiation and booting of a Firecracker VMM.
 
 #[cfg(target_arch = "x86_64")]
-use std::convert::TryFrom;
-use std::fmt::Debug;
-use std::io::{self, Seek, SeekFrom};
-#[cfg(feature = "gdb")]
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::io::{Cursor, Read};
-use kvm_bindings::{kvm_cap_arm_rme_config_item, kvm_cap_arm_rme_init_ipa_args, kvm_cap_arm_rme_populate_realm_args, kvm_enable_cap, kvm_memory_attributes, KVM_ARM_VCPU_REC, KVM_CAP_ARM_RME, KVM_CAP_ARM_RME_ACTIVATE_REALM, KVM_CAP_ARM_RME_CFG_HASH_ALGO, KVM_CAP_ARM_RME_CFG_RPV, KVM_CAP_ARM_RME_CONFIG_REALM, KVM_CAP_ARM_RME_CREATE_RD, KVM_CAP_ARM_RME_INIT_IPA_REALM, KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA256, KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA512, KVM_CAP_ARM_RME_POPULATE_REALM, KVM_MEMORY_ATTRIBUTE_PRIVATE};
-use event_manager::{MutEventSubscriber, SubscriberOps};
-use libc::EFD_NONBLOCK;
-use linux_loader::cmdline::Cmdline as LoaderKernelCmdline;
-#[cfg(target_arch = "x86_64")]
-use linux_loader::loader::elf::Elf as Loader;
-#[cfg(target_arch = "aarch64")]
-use linux_loader::loader::pe::PE as Loader;
-use linux_loader::loader::KernelLoader;
-use userfaultfd::Uffd;
-use utils::time::TimestampUs;
-use vm_memory::{Address, GuestMemoryRegion, GuestUsize, ReadVolatile};
-#[cfg(target_arch = "aarch64")]
-use vm_superio::Rtc;
-use vm_superio::Serial;
-use vmm_sys_util::errno;
-use vmm_sys_util::eventfd::EventFd;
-use log::info;
-use crate::gpu_passthrough::GpuPassthroughManager;
-#[cfg(target_arch = "x86_64")]
 use crate::acpi;
 use crate::arch::aarch64::{get_fdt_addr, layout};
 use crate::arch::InitrdConfig;
@@ -63,6 +36,7 @@ use crate::devices::virtio::vsock::{Vsock, VsockUnixBackend};
 use crate::devices::BusDevice;
 #[cfg(feature = "gdb")]
 use crate::gdb;
+use crate::gpu_passthrough::GpuPassthroughManager;
 use crate::logger::{debug, error};
 use crate::persist::{MicrovmState, MicrovmStateError};
 use crate::resources::VmResources;
@@ -77,6 +51,40 @@ use crate::vstate::memory::{GuestAddress, GuestMemory, GuestMemoryMmap};
 use crate::vstate::vcpu::{Vcpu, VcpuConfig, VcpuError};
 use crate::vstate::vm::Vm;
 use crate::{device_manager, EventManager, Vmm, VmmError};
+use event_manager::{MutEventSubscriber, SubscriberOps};
+use kvm_bindings::{
+    kvm_cap_arm_rme_config_item, kvm_cap_arm_rme_init_ipa_args,
+    kvm_cap_arm_rme_populate_realm_args, kvm_enable_cap, kvm_memory_attributes, KVM_ARM_VCPU_REC,
+    KVM_CAP_ARM_RME, KVM_CAP_ARM_RME_ACTIVATE_REALM, KVM_CAP_ARM_RME_CFG_HASH_ALGO,
+    KVM_CAP_ARM_RME_CFG_RPV, KVM_CAP_ARM_RME_CONFIG_REALM, KVM_CAP_ARM_RME_CREATE_RD,
+    KVM_CAP_ARM_RME_INIT_IPA_REALM, KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA256,
+    KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA512, KVM_CAP_ARM_RME_POPULATE_REALM,
+    KVM_MEMORY_ATTRIBUTE_PRIVATE,
+};
+use libc::EFD_NONBLOCK;
+use linux_loader::cmdline::Cmdline as LoaderKernelCmdline;
+#[cfg(target_arch = "x86_64")]
+use linux_loader::loader::elf::Elf as Loader;
+#[cfg(target_arch = "aarch64")]
+use linux_loader::loader::pe::PE as Loader;
+use linux_loader::loader::KernelLoader;
+use log::info;
+#[cfg(target_arch = "x86_64")]
+use std::convert::TryFrom;
+use std::fmt::Debug;
+use std::io::{self, Seek, SeekFrom};
+use std::io::{Cursor, Read};
+#[cfg(feature = "gdb")]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use userfaultfd::Uffd;
+use utils::time::TimestampUs;
+use vm_memory::{Address, GuestMemoryRegion, GuestUsize, ReadVolatile};
+#[cfg(target_arch = "aarch64")]
+use vm_superio::Rtc;
+use vm_superio::Serial;
+use vmm_sys_util::errno;
+use vmm_sys_util::eventfd::EventFd;
 
 /// Errors associated with starting the instance.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -100,6 +108,8 @@ pub enum StartMicrovmError {
     CreateVMGenID(VmGenIdError),
     /// Invalid Memory Configuration: {0}
     GuestMemory(crate::vstate::memory::MemoryError),
+    /// Cannot attach vmshm broker-backed memory: {0}
+    Vmshm(crate::vmshm::VmshmError),
     /// Cannot load initrd due to an invalid memory configuration.
     InitrdLoad,
     /// Cannot load initrd due to an invalid image: {0}
@@ -157,7 +167,7 @@ pub enum StartMicrovmError {
     /// Error cloning Vcpu fds
     #[cfg(feature = "gdb")]
     VcpuFdCloneError(#[from] crate::vstate::vcpu::CopyKvmFdError),
-    /// Error init gpu mmio 
+    /// Error init gpu mmio
     #[cfg(target_arch = "aarch64")]
     GpuMmioInit(kvm_ioctls::Error),
     /// Failed to setup GPU Passthrough: {0}
@@ -219,7 +229,7 @@ fn create_vmm_and_vcpus(
         pio_dev_mgr.register_devices(vm.fd()).unwrap();
         pio_dev_mgr
     };
-    let gpu_passthrough_manager=gpu_irq_init(&vm)?;
+    let gpu_passthrough_manager = gpu_irq_init(&vm)?;
     let vmm = Vmm {
         events_observer: Some(std::io::stdin()),
         instance_info: instance_info.clone(),
@@ -227,6 +237,7 @@ fn create_vmm_and_vcpus(
         kvm,
         vm,
         guest_memory,
+        vmshm_regions: Vec::new(),
         uffd,
         vcpus_handles: Vec::new(),
         vcpus_exit_evt,
@@ -281,7 +292,7 @@ pub fn build_microvm_for_boot(
     let vm = Vm::new(&kvm, vm_resources.machine_config.clone())
         .map_err(VmmError::Vm)
         .map_err(StartMicrovmError::Internal)?;
-    
+
     let guest_memory = vm_resources
         .allocate_guest_memory(Some(&vm))
         .map_err(StartMicrovmError::GuestMemory)?;
@@ -293,13 +304,19 @@ pub fn build_microvm_for_boot(
     mem_need_populate.push((entry_addr, kernel_end - entry_addr.raw_value()));
     let initrd = load_initrd_from_config(boot_config, &guest_memory)?;
     if initrd.is_some() {
-        mem_need_populate.push((initrd.as_ref().unwrap().address, initrd.as_ref().unwrap().size as u64));
+        mem_need_populate.push((
+            initrd.as_ref().unwrap().address,
+            initrd.as_ref().unwrap().size as u64,
+        ));
     }
-    mem_need_populate.push((GuestAddress(get_fdt_addr(&guest_memory)), layout::FDT_MAX_SIZE as u64));
+    mem_need_populate.push((
+        GuestAddress(get_fdt_addr(&guest_memory)),
+        layout::FDT_MAX_SIZE as u64,
+    ));
     // add RESERVED MEM to populate
-    let (reserved_addr,reserved_size)=load_reserved(&guest_memory)?;
+    let (reserved_addr, reserved_size) = load_reserved(&guest_memory)?;
     //
-    mem_need_populate.push((reserved_addr,reserved_size));
+    mem_need_populate.push((reserved_addr, reserved_size));
     kvm.check_memory(&guest_memory)
         .map_err(VmmError::Kvm)
         .map_err(StartMicrovmError::Internal)?;
@@ -315,6 +332,8 @@ pub fn build_microvm_for_boot(
         kvm,
         vm,
     )?;
+    crate::vmshm::attach_vmshm_regions(&mut vmm, &vm_resources.vmshm)
+        .map_err(StartMicrovmError::Vmshm)?;
 
     #[cfg(feature = "gdb")]
     let (gdb_tx, gdb_rx) = mpsc::channel();
@@ -361,7 +380,8 @@ pub fn build_microvm_for_boot(
     }
 
     #[cfg(target_arch = "aarch64")]
-    attach_legacy_devices_aarch64(event_manager, &mut vmm, &mut boot_cmdline, is_realm).map_err(Internal)?;
+    attach_legacy_devices_aarch64(event_manager, &mut vmm, &mut boot_cmdline, is_realm)
+        .map_err(Internal)?;
 
     attach_vmgenid_device(&mut vmm)?;
 
@@ -377,11 +397,17 @@ pub fn build_microvm_for_boot(
     )?;
 
     if is_realm {
-        config_realm(&mut vmm, vm_resources.machine_config.realm_config.clone().unwrap(), mem_need_populate)?;
+        config_realm(
+            &mut vmm,
+            vm_resources.machine_config.realm_config.clone().unwrap(),
+            mem_need_populate,
+        )?;
 
         for vcpu in vcpus.iter_mut() {
             let feature = KVM_ARM_VCPU_REC as i32;
-            vcpu.kvm_vcpu.fd.vcpu_finalize(&feature)
+            vcpu.kvm_vcpu
+                .fd
+                .vcpu_finalize(&feature)
                 .map_err(StartMicrovmError::FinalizeRec)?;
             println!("vcpu inited {}", vcpu.kvm_vcpu.index);
         }
@@ -397,7 +423,7 @@ pub fn build_microvm_for_boot(
     } else {
         debug!("No GDB socket provided not starting gdb server.");
     }
-    
+
     for vcpu in vcpus.iter_mut() {
         vcpu.set_vmm(vmm.clone());
     }
@@ -432,17 +458,22 @@ pub fn build_microvm_for_boot(
     Ok(vmm)
 }
 
-pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate: Vec<(GuestAddress, GuestUsize)>) -> Result<(), StartMicrovmError> {
+pub fn config_realm(
+    vmm: &mut Vmm,
+    realm_config: RealmConfig,
+    mem_need_populate: Vec<(GuestAddress, GuestUsize)>,
+) -> Result<(), StartMicrovmError> {
     if realm_config.hash_algorithm.is_some() {
         let mut hash_algo_cfg = kvm_cap_arm_rme_config_item {
             cfg: KVM_CAP_ARM_RME_CFG_HASH_ALGO,
             ..Default::default()
         };
-        hash_algo_cfg.__bindgen_anon_1.__bindgen_anon_2.hash_algo = if realm_config.hash_algorithm.unwrap() == "SHA256" {
-            KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA256
-        } else {
-            KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA512
-        };
+        hash_algo_cfg.__bindgen_anon_1.__bindgen_anon_2.hash_algo =
+            if realm_config.hash_algorithm.unwrap() == "SHA256" {
+                KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA256
+            } else {
+                KVM_CAP_ARM_RME_MEASUREMENT_ALGO_SHA512
+            };
         let kvm_enable_cap_cfg = kvm_enable_cap {
             cap: KVM_CAP_ARM_RME,
             args: [
@@ -453,7 +484,10 @@ pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate:
             ],
             ..Default::default()
         };
-        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::ConfigHashAlgo(e))?;
+        vmm.vm
+            .fd()
+            .enable_cap(&kvm_enable_cap_cfg)
+            .map_err(|e| StartMicrovmError::ConfigHashAlgo(e))?;
     }
     if realm_config.personalization_value.is_some() {
         let mut rpv_cfg = kvm_cap_arm_rme_config_item {
@@ -462,7 +496,10 @@ pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate:
         };
         for i in 0..64 {
             // SAFETY: we only use the rpv as a 64 bytes array
-            unsafe {rpv_cfg.__bindgen_anon_1.__bindgen_anon_1.rpv[i] = realm_config.personalization_value.unwrap()[i]; }
+            unsafe {
+                rpv_cfg.__bindgen_anon_1.__bindgen_anon_1.rpv[i] =
+                    realm_config.personalization_value.unwrap()[i];
+            }
         }
         let kvm_enable_cap_cfg = kvm_enable_cap {
             cap: KVM_CAP_ARM_RME,
@@ -474,20 +511,21 @@ pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate:
             ],
             ..Default::default()
         };
-        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::ConfigHashAlgo(e))?;
+        vmm.vm
+            .fd()
+            .enable_cap(&kvm_enable_cap_cfg)
+            .map_err(|e| StartMicrovmError::ConfigHashAlgo(e))?;
     }
-    
+
     let kvm_enable_cap_cfg = kvm_enable_cap {
         cap: KVM_CAP_ARM_RME,
-        args: [
-            KVM_CAP_ARM_RME_CREATE_RD as u64,
-            0,
-            0,
-            0,
-        ],
+        args: [KVM_CAP_ARM_RME_CREATE_RD as u64, 0, 0, 0],
         ..Default::default()
     };
-    vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::CreateRealmDescriptor(e))?;
+    vmm.vm
+        .fd()
+        .enable_cap(&kvm_enable_cap_cfg)
+        .map_err(|e| StartMicrovmError::CreateRealmDescriptor(e))?;
     use log::info;
     vmm.guest_memory.iter().for_each(|region| {
         info!(
@@ -496,58 +534,67 @@ pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate:
             region.start_addr().raw_value() + region.len() - 1
         );
     });
-    vmm.guest_memory.iter().try_for_each(|region| {
-        let init_ipa_args = kvm_cap_arm_rme_init_ipa_args {
-            init_ipa_base: region.start_addr().raw_value(),
-            init_ipa_size: region.len() as u64,
-            ..Default::default()
-        };
-        let kvm_enable_cap_cfg = kvm_enable_cap {
-            cap: KVM_CAP_ARM_RME,
-            args: [
-                KVM_CAP_ARM_RME_INIT_IPA_REALM as u64,
-                &init_ipa_args as *const _ as u64,
-                0,
-                0,
-            ],
-            ..Default::default()
-        };
+    vmm.guest_memory
+        .iter()
+        .try_for_each(|region| {
+            let init_ipa_args = kvm_cap_arm_rme_init_ipa_args {
+                init_ipa_base: region.start_addr().raw_value(),
+                init_ipa_size: region.len() as u64,
+                ..Default::default()
+            };
+            let kvm_enable_cap_cfg = kvm_enable_cap {
+                cap: KVM_CAP_ARM_RME,
+                args: [
+                    KVM_CAP_ARM_RME_INIT_IPA_REALM as u64,
+                    &init_ipa_args as *const _ as u64,
+                    0,
+                    0,
+                ],
+                ..Default::default()
+            };
 
-        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg)
-    }).map_err(|e| StartMicrovmError::InitIpaRealm(e))?;
+            vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg)
+        })
+        .map_err(|e| StartMicrovmError::InitIpaRealm(e))?;
 
-    mem_need_populate.iter().try_for_each(|region| {
-        let populate_ipa_args = kvm_cap_arm_rme_populate_realm_args {
-            populate_ipa_base: region.0.raw_value(),
-            populate_ipa_size: region.1,
-            flags: 1, // KVM_ARM_RME_POPULATE_FLAGS_MEASURE
-            ..Default::default()
-        };
-        let kvm_enable_cap_cfg = kvm_enable_cap {
-            cap: KVM_CAP_ARM_RME,
-            args: [
-                KVM_CAP_ARM_RME_POPULATE_REALM as u64,
-                &populate_ipa_args as *const _ as u64,
-                0,
-                0,
-            ],
-            ..Default::default()
-        };
+    mem_need_populate
+        .iter()
+        .try_for_each(|region| {
+            let populate_ipa_args = kvm_cap_arm_rme_populate_realm_args {
+                populate_ipa_base: region.0.raw_value(),
+                populate_ipa_size: region.1,
+                flags: 1, // KVM_ARM_RME_POPULATE_FLAGS_MEASURE
+                ..Default::default()
+            };
+            let kvm_enable_cap_cfg = kvm_enable_cap {
+                cap: KVM_CAP_ARM_RME,
+                args: [
+                    KVM_CAP_ARM_RME_POPULATE_REALM as u64,
+                    &populate_ipa_args as *const _ as u64,
+                    0,
+                    0,
+                ],
+                ..Default::default()
+            };
 
-        vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg)
-    }).map_err(|e| StartMicrovmError::PopulateRealm(e))?;
+            vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg)
+        })
+        .map_err(|e| StartMicrovmError::PopulateRealm(e))?;
 
-    vmm.guest_memory.iter().try_for_each(|region| {
-        // TODO: mmap(PROT_NONE) the region 
-        let set_mem_attributes_args = kvm_memory_attributes {
-            address: region.start_addr().raw_value(),
-            size: region.len() as u64,
-            attributes: KVM_MEMORY_ATTRIBUTE_PRIVATE as u64,
-            ..Default::default()
-        };
+    vmm.guest_memory
+        .iter()
+        .try_for_each(|region| {
+            // TODO: mmap(PROT_NONE) the region
+            let set_mem_attributes_args = kvm_memory_attributes {
+                address: region.start_addr().raw_value(),
+                size: region.len() as u64,
+                attributes: KVM_MEMORY_ATTRIBUTE_PRIVATE as u64,
+                ..Default::default()
+            };
 
-        vmm.vm.fd().set_memory_attributes(set_mem_attributes_args)
-    }).map_err(|e| StartMicrovmError::SetMemoryAttributes(e))?;
+            vmm.vm.fd().set_memory_attributes(set_mem_attributes_args)
+        })
+        .map_err(|e| StartMicrovmError::SetMemoryAttributes(e))?;
 
     Ok(())
 }
@@ -555,15 +602,13 @@ pub fn config_realm(vmm: &mut Vmm, realm_config: RealmConfig, mem_need_populate:
 pub fn activate_realm(vmm: &mut Vmm) -> Result<(), StartMicrovmError> {
     let kvm_enable_cap_cfg = kvm_enable_cap {
         cap: KVM_CAP_ARM_RME,
-        args: [
-            KVM_CAP_ARM_RME_ACTIVATE_REALM as u64,
-            0,
-            0,
-            0,
-        ],
+        args: [KVM_CAP_ARM_RME_ACTIVATE_REALM as u64, 0, 0, 0],
         ..Default::default()
     };
-    vmm.vm.fd().enable_cap(&kvm_enable_cap_cfg).map_err(|e| StartMicrovmError::ActivateRealm(e))?;
+    vmm.vm
+        .fd()
+        .enable_cap(&kvm_enable_cap_cfg)
+        .map_err(|e| StartMicrovmError::ActivateRealm(e))?;
     Ok(())
 }
 
@@ -767,19 +812,19 @@ pub fn build_microvm_from_snapshot(
 }
 
 // init reserved mem to 0
-fn load_reserved(guest_memory: &GuestMemoryMmap)->Result<(GuestAddress, GuestUsize), StartMicrovmError> {
-    let size=layout::RESERVERD_MEM_SIZE as usize;
+fn load_reserved(
+    guest_memory: &GuestMemoryMmap,
+) -> Result<(GuestAddress, GuestUsize), StartMicrovmError> {
+    let size = layout::RESERVERD_MEM_SIZE as usize;
     //to do:build GuestAddress
-    let start_addr=GuestAddress(layout::RESERVERD_MEM_START);
-    let reserved_size=GuestAddress(size as u64);
+    let start_addr = GuestAddress(layout::RESERVERD_MEM_START);
+    let reserved_size = GuestAddress(size as u64);
     let reserved_guest_size: GuestUsize = reserved_size.raw_value();
     let zero_buf = vec![0u8; size as usize];
     let mut cursor = Cursor::new(zero_buf);
     //
-    guest_memory
-        .read_exact_volatile_from(start_addr, &mut cursor,size);
-    Ok((start_addr,reserved_guest_size))
-
+    guest_memory.read_exact_volatile_from(start_addr, &mut cursor, size);
+    Ok((start_addr, reserved_guest_size))
 }
 fn load_kernel(
     boot_config: &BootConfig,
@@ -897,14 +942,16 @@ pub fn setup_serial_device(
     Ok(serial)
 }
 #[cfg(target_arch = "aarch64")]
-fn gpu_mmio_init(vm:&Vm)-> Result<(), StartMicrovmError> {
-    const GPU_MMIO_ADDR:u64=0xfb000000;
-    const GPU_MMIO_SIZE:u64=0x200000;
-    vm.fd().set_mmio_region(GPU_MMIO_ADDR,GPU_MMIO_SIZE).map_err(StartMicrovmError::GpuMmioInit)?;
+fn gpu_mmio_init(vm: &Vm) -> Result<(), StartMicrovmError> {
+    const GPU_MMIO_ADDR: u64 = 0xfb000000;
+    const GPU_MMIO_SIZE: u64 = 0x200000;
+    vm.fd()
+        .set_mmio_region(GPU_MMIO_ADDR, GPU_MMIO_SIZE)
+        .map_err(StartMicrovmError::GpuMmioInit)?;
     Ok(())
 }
 
-fn gpu_irq_init(vm:&Vm)-> Result<GpuPassthroughManager, StartMicrovmError> {
+fn gpu_irq_init(vm: &Vm) -> Result<GpuPassthroughManager, StartMicrovmError> {
     // const GPU_JOB_LINUX_IRQ:u64=77;
     // const GPU_MMU_LINUX_IRQ:u64=78;
     // const GPU_GPU_LINUX_IRQ:u64=79;
@@ -915,31 +962,36 @@ fn gpu_irq_init(vm:&Vm)-> Result<GpuPassthroughManager, StartMicrovmError> {
     // 1. 定义起始 GSI (Guest 内部的中断号)
     // 根据你的定义，Job IRQ 是 92 + 32 = 124
     // 定义 Guest 侧的中断号起始值 (92 + 32)
-    const GPU_BASE_GSI: u32 = 92; 
+    const GPU_BASE_GSI: u32 = 92;
     const GPU_DEV_PATH: &str = "/dev/pmthor";
 
     // 1. 初始化管理器 (打开设备并创建 EventFD)
     // 使用 .map_err 将 io::Error 转换为 StartMicrovmError::GpuPassthrough
-    let gpu_mgr = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)
-        .map_err(|e| StartMicrovmError::GpuPassthrough(
-            format!("Failed to open GPU device {}: {}", GPU_DEV_PATH, e)
-        ))?;
+    let gpu_mgr = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI).map_err(|e| {
+        StartMicrovmError::GpuPassthrough(format!(
+            "Failed to open GPU device {}: {}",
+            GPU_DEV_PATH, e
+        ))
+    })?;
 
     // 2. 执行绑定 (配置物理驱动和 KVM irqfd)
-    gpu_mgr.attach_to_kvm(vm.fd())
-        .map_err(|e| StartMicrovmError::GpuPassthrough(
-            format!("Failed to setup GPU irqfd: {}", e)
-        ))?;
+    gpu_mgr.attach_to_kvm(vm.fd()).map_err(|e| {
+        StartMicrovmError::GpuPassthrough(format!("Failed to setup GPU irqfd: {}", e))
+    })?;
 
     // 为了确保 EventFD 在虚拟机运行期间不被 Drop (关闭)，
     // 你需要确保 gpu_mgr 的生命周期足够长。
     // 如果你在 Vm 结构体中定义了存放它的地方：
-    // vm.gpu_manager = Some(gpu_mgr); 
-    
+    // vm.gpu_manager = Some(gpu_mgr);
+
     // 如果暂时没地方放，为了联调可以通过 Box::leak 保持（仅限测试）：
     // std::boxed::Box::leak(std::boxed::Box::new(gpu_mgr));
 
-    info!("GPU Passthrough IRQs (GSI {}-{}) initialized successfully.", GPU_BASE_GSI, GPU_BASE_GSI + 2);
+    info!(
+        "GPU Passthrough IRQs (GSI {}-{}) initialized successfully.",
+        GPU_BASE_GSI,
+        GPU_BASE_GSI + 2
+    );
     Ok(gpu_mgr)
 }
 
@@ -1098,6 +1150,7 @@ pub fn configure_system_for_boot(
             .map(|cpu| cpu.kvm_vcpu.get_mpidr())
             .collect();
         let cmdline = boot_cmdline.as_cstring()?;
+        let vmshm_fdt_info = vmm.vmshm_fdt_info();
         crate::arch::aarch64::configure_system(
             &vmm.guest_memory,
             cmdline,
@@ -1106,6 +1159,7 @@ pub fn configure_system_for_boot(
             vmm.vm.get_irqchip(),
             &vmm.acpi_device_manager.vmgenid,
             initrd,
+            &vmshm_fdt_info,
         )
         .map_err(ConfigureSystem)?;
     }
@@ -1288,7 +1342,7 @@ pub(crate) mod tests {
     use crate::devices::virtio::vsock::{TYPE_VSOCK, VSOCK_DEV_ID};
     use crate::devices::virtio::{TYPE_BALLOON, TYPE_BLOCK, TYPE_RNG};
     use crate::gpu_passthrough;
-use crate::mmds::data_store::{Mmds, MmdsVersion};
+    use crate::mmds::data_store::{Mmds, MmdsVersion};
     use crate::mmds::ns::MmdsNetworkStack;
     use crate::test_utils::{single_region_mem, single_region_mem_at};
     use crate::vmm_config::balloon::{BalloonBuilder, BalloonDeviceConfig, BALLOON_DEV_ID};
@@ -1299,7 +1353,7 @@ use crate::mmds::data_store::{Mmds, MmdsVersion};
     use crate::vmm_config::vsock::tests::default_config;
     use crate::vmm_config::vsock::{VsockBuilder, VsockDeviceConfig};
     use crate::vstate::vm::tests::setup_vm_with_memory;
-    const GPU_BASE_GSI: u32 = 92; 
+    const GPU_BASE_GSI: u32 = 92;
     const GPU_DEV_PATH: &str = "/dev/pmthor";
     #[derive(Debug)]
     pub(crate) struct CustomBlockConfig {
@@ -1359,7 +1413,7 @@ use crate::mmds::data_store::{Mmds, MmdsVersion};
 
         let mmio_device_manager = MMIODeviceManager::new();
         let acpi_device_manager = ACPIDeviceManager::new();
-        let gpu_passthrough_manager=GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)?;
+        let gpu_passthrough_manager = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)?;
         #[cfg(target_arch = "x86_64")]
         let pio_device_manager = PortIODeviceManager::new(
             Arc::new(Mutex::new(BusDevice::Serial(SerialWrapper {
@@ -1385,6 +1439,7 @@ use crate::mmds::data_store::{Mmds, MmdsVersion};
             kvm,
             vm,
             guest_memory,
+            vmshm_regions: Vec::new(),
             uffd: None,
             vcpus_handles: Vec::new(),
             vcpus_exit_evt,

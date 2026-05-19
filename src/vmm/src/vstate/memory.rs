@@ -89,11 +89,10 @@ where
     }
 
     /// Creates a GuestMemoryMmap with `size` in MiB backed by a guest memfd.
-    fn guest_memfd_backed(
-        mem_size_mib: usize,
-        vm: &Vm
-    ) -> Result<Self, MemoryError> {
-        let guest_memfd_file = vm.create_guest_memfd(mem_size_mib).map_err(|e| MemoryError::GuestMemfd(e))?;
+    fn guest_memfd_backed(mem_size_mib: usize, vm: &Vm) -> Result<Self, MemoryError> {
+        let guest_memfd_file = vm
+            .create_guest_memfd(mem_size_mib)
+            .map_err(|e| MemoryError::GuestMemfd(e))?;
         let regions = arch_memory_regions(mem_size_mib << 20).into_iter();
 
         Self::create(
@@ -116,7 +115,7 @@ where
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | huge_pages.mmap_flags(),
             None,
             track_dirty_pages,
-            None
+            None,
         )
     }
 
@@ -132,7 +131,7 @@ where
             libc::MAP_PRIVATE,
             Some(file),
             track_dirty_pages,
-            None
+            None,
         )
     }
 

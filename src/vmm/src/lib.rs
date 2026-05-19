@@ -27,6 +27,31 @@ pub mod arch;
 /// [This pdf](https://kernel.dk/io_uring.pdf) is also very useful, though outdated at times.
 pub mod io_uring;
 
+/// Module for handling ACPI tables.
+/// Currently, we only use ACPI on x86 microVMs.
+#[cfg(target_arch = "x86_64")]
+pub mod acpi;
+/// Handles setup and initialization a `Vmm` object.
+pub mod builder;
+/// Types for guest configuration.
+pub mod cpu_config;
+pub(crate) mod device_manager;
+/// Emulates virtual and hardware devices.
+#[allow(missing_docs)]
+pub mod devices;
+/// minimalist HTTP/TCP/IPv4 stack named DUMBO
+pub mod dumbo;
+/// Support for GDB debugging the guest
+#[cfg(feature = "gdb")]
+pub mod gdb;
+pub mod gpu_passthrough;
+/// Logger
+pub mod logger;
+/// microVM Metadata Service MMDS
+pub mod mmds;
+/// Save/restore utilities.
+pub mod persist;
+pub mod pmthor;
 /// # Rate Limiter
 ///
 /// Provides a rate limiter written in Rust useful for IO operations that need to
@@ -68,31 +93,6 @@ pub mod io_uring;
 /// trait and provides an *event-handler* as part of its API. This *event-handler*
 /// needs to be called by the user on every event on the rate limiter's `AsRawFd` FD.
 pub mod rate_limiter;
-pub mod pmthor;
-pub mod gpu_passthrough;
-/// Module for handling ACPI tables.
-/// Currently, we only use ACPI on x86 microVMs.
-#[cfg(target_arch = "x86_64")]
-pub mod acpi;
-/// Handles setup and initialization a `Vmm` object.
-pub mod builder;
-/// Types for guest configuration.
-pub mod cpu_config;
-pub(crate) mod device_manager;
-/// Emulates virtual and hardware devices.
-#[allow(missing_docs)]
-pub mod devices;
-/// minimalist HTTP/TCP/IPv4 stack named DUMBO
-pub mod dumbo;
-/// Support for GDB debugging the guest
-#[cfg(feature = "gdb")]
-pub mod gdb;
-/// Logger
-pub mod logger;
-/// microVM Metadata Service MMDS
-pub mod mmds;
-/// Save/restore utilities.
-pub mod persist;
 /// Resource store for configured microVM resources.
 pub mod resources;
 /// microVM RPC API adapters.
@@ -109,6 +109,8 @@ pub mod test_utils;
 pub mod utils;
 /// Wrappers over structures used to configure the VMM.
 pub mod vmm_config;
+/// Broker-backed shared memory support.
+pub mod vmshm;
 /// Module with virtual state structs.
 pub mod vstate;
 
@@ -315,6 +317,7 @@ pub struct Vmm {
     kvm: Kvm,
     vm: Vm,
     guest_memory: GuestMemoryMmap,
+    vmshm_regions: Vec<vmshm::VmshmRegion>,
     // Save UFFD in order to keep it open in the Firecracker process, as well.
     uffd: Option<Uffd>,
     vcpus_handles: Vec<VcpuHandle>,
@@ -328,10 +331,18 @@ pub struct Vmm {
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
     acpi_device_manager: ACPIDeviceManager,
-    gpu_passthrough_manager:GpuPassthroughManager,
+    gpu_passthrough_manager: GpuPassthroughManager,
 }
 
 impl Vmm {
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn vmshm_fdt_info(&self) -> Vec<vmshm::VmshmFdtInfo> {
+        self.vmshm_regions
+            .iter()
+            .map(vmshm::VmshmRegion::fdt_info)
+            .collect()
+    }
+
     /// Gets Vmm version.
     pub fn version(&self) -> String {
         self.instance_info.vmm_version.clone()

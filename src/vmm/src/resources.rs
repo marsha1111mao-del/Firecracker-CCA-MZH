@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::cpu_config::templates::CustomCpuTemplate;
 use crate::device_manager::persist::SharedDeviceType;
 use crate::logger::info;
-use crate::{mmds, Vm};
 use crate::mmds::data_store::{Mmds, MmdsVersion};
 use crate::mmds::ns::MmdsNetworkStack;
 use crate::utils::net::ipv4addr::is_link_local_valid;
@@ -27,8 +26,10 @@ use crate::vmm_config::machine_config::{
 use crate::vmm_config::metrics::{init_metrics, MetricsConfig, MetricsConfigError};
 use crate::vmm_config::mmds::{MmdsConfig, MmdsConfigError};
 use crate::vmm_config::net::*;
+use crate::vmm_config::vmshm::VmshmDeviceConfig;
 use crate::vmm_config::vsock::*;
 use crate::vstate::memory::{GuestMemoryExtension, GuestMemoryMmap, MemoryError};
+use crate::{mmds, Vm};
 
 /// Errors encountered when configuring microVM resources.
 #[derive(Debug, thiserror::Error, displaydoc::Display)]
@@ -77,6 +78,8 @@ pub struct VmmConfig {
     network_interfaces: Vec<NetworkInterfaceConfig>,
     vsock: Option<VsockDeviceConfig>,
     entropy: Option<EntropyDeviceConfig>,
+    #[serde(default)]
+    vmshm: Vec<VmshmDeviceConfig>,
 }
 
 /// A data structure that encapsulates the device configurations
@@ -97,6 +100,8 @@ pub struct VmResources {
     pub net_builder: NetBuilder,
     /// The entropy device builder.
     pub entropy: EntropyDeviceBuilder,
+    /// Broker-backed shared memory windows to attach before boot.
+    pub vmshm: Vec<VmshmDeviceConfig>,
     /// The optional Mmds data store.
     // This is initialised on demand (if ever used), so that we don't allocate it unless it's
     // actually used.
@@ -158,6 +163,8 @@ impl VmResources {
         if let Some(balloon_config) = vmm_config.balloon {
             resources.set_balloon_device(balloon_config)?;
         }
+
+        resources.vmshm = vmm_config.vmshm;
 
         // Init the data store from file, if present.
         if let Some(data) = metadata_json {
@@ -439,7 +446,7 @@ impl VmResources {
     ///
     /// If vhost-user-blk devices are in use, allocates memfd-backed shared memory, otherwise
     /// prefers anonymous memory for performance reasons.
-    pub fn allocate_guest_memory(&self, vm: Option<&Vm> ) -> Result<GuestMemoryMmap, MemoryError> {
+    pub fn allocate_guest_memory(&self, vm: Option<&Vm>) -> Result<GuestMemoryMmap, MemoryError> {
         if self.machine_config.realm_config.is_some() && vm.is_some() {
             return self.allocate_guest_memfd_memory(vm.unwrap());
         }
@@ -477,10 +484,7 @@ impl VmResources {
     /// Allocates guest memory in a configuration most appropriate for these [`VmResources`].
     /// used by arm cca Realms
     pub fn allocate_guest_memfd_memory(&self, vm: &Vm) -> Result<GuestMemoryMmap, MemoryError> {
-        GuestMemoryMmap::guest_memfd_backed(
-            self.machine_config.mem_size_mib,
-            vm
-        )
+        GuestMemoryMmap::guest_memfd_backed(self.machine_config.mem_size_mib, vm)
     }
 }
 
@@ -498,6 +502,7 @@ impl From<&VmResources> for VmmConfig {
             network_interfaces: resources.net_builder.configs(),
             vsock: resources.vsock.config(),
             entropy: resources.entropy.config(),
+            vmshm: resources.vmshm.clone(),
         }
     }
 }
@@ -607,6 +612,7 @@ mod tests {
             boot_timer: false,
             mmds_size_limit: HTTP_MAX_PAYLOAD_SIZE,
             entropy: Default::default(),
+            vmshm: Default::default(),
         }
     }
 
@@ -1342,7 +1348,10 @@ mod tests {
             track_dirty_pages: Some(false),
             huge_pages: Some(HugePageConfig::None),
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]
-            realm_config: Some(RealmConfig::new(Some("SHA256".to_string()), Some([0u8; 64]))),
+            realm_config: Some(RealmConfig::new(
+                Some("SHA256".to_string()),
+                Some([0u8; 64]),
+            )),
         };
 
         assert_ne!(
