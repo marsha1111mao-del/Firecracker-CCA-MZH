@@ -75,6 +75,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     vmgenid: &Option<VmGenId>,
     initrd: &Option<InitrdConfig>,
     vmshm: &[VmshmFdtInfo],
+    has_gpu_passthrough: bool,
 ) -> Result<Vec<u8>, FdtError> {
     // Allocate stuff necessary for storing the blob.
     let mut fdt_writer = FdtWriter::new()?;
@@ -105,7 +106,9 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     create_vmgenid_node(&mut fdt_writer, vmgenid)?;
     create_vmshm_nodes(&mut fdt_writer, vmshm)?;
 
-    create_gpu_node(&mut fdt_writer)?;
+    if has_gpu_passthrough {
+        create_gpu_node(&mut fdt_writer)?;
+    }
     // End Header node.
     fdt_writer.end_node(root)?;
     // Allocate another buffer so we can format and then write fdt to guest.
@@ -283,10 +286,20 @@ fn create_memory_node(fdt: &mut FdtWriter, guest_mem: &GuestMemoryMmap) -> Resul
 
 fn create_vmshm_nodes(fdt: &mut FdtWriter, vmshm: &[VmshmFdtInfo]) -> Result<(), FdtError> {
     for window in vmshm {
-        let node_name = format!("vmshm@{:x}", window.guest_phys_addr);
-        let node = fdt.begin_node(&node_name)?;
-        fdt.property_string("compatible", "vmshm")?;
+        let node = fdt.begin_node(&window.node_name)?;
+        fdt.property_string("compatible", &window.compatible)?;
         fdt.property_array_u64("reg", &[window.guest_phys_addr, window.size])?;
+        if let Some(notify) = window.notify.as_ref() {
+            fdt.property_array_u64(
+                "vmshm-doorbell-reg",
+                &[notify.doorbell_addr, notify.doorbell_size],
+            )?;
+            fdt.property_array_u32(
+                "interrupts",
+                &[GIC_FDT_IRQ_TYPE_SPI, notify.irq, IRQ_TYPE_EDGE_RISING],
+            )?;
+            fdt.property_u32("interrupt-parent", GIC_PHANDLE)?;
+        }
         fdt.end_node(node)?;
     }
 
@@ -665,6 +678,7 @@ mod tests {
             &None,
             &None,
             &[],
+            false,
         )
         .unwrap();
     }
@@ -686,6 +700,7 @@ mod tests {
             &Some(vmgenid),
             &None,
             &[],
+            false,
         )
         .unwrap();
     }
@@ -712,6 +727,7 @@ mod tests {
             &None,
             &None,
             &[],
+            false,
         )
         .unwrap();
 
@@ -775,6 +791,7 @@ mod tests {
             &None,
             &Some(initrd),
             &[],
+            false,
         )
         .unwrap();
 

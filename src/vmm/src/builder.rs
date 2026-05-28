@@ -229,7 +229,6 @@ fn create_vmm_and_vcpus(
         pio_dev_mgr.register_devices(vm.fd()).unwrap();
         pio_dev_mgr
     };
-    let gpu_passthrough_manager = gpu_irq_init(&vm)?;
     let vmm = Vmm {
         events_observer: Some(std::io::stdin()),
         instance_info: instance_info.clone(),
@@ -246,7 +245,7 @@ fn create_vmm_and_vcpus(
         #[cfg(target_arch = "x86_64")]
         pio_device_manager,
         acpi_device_manager,
-        gpu_passthrough_manager,
+        gpu_passthrough_manager: None,
     };
 
     Ok((vmm, vcpus))
@@ -334,6 +333,7 @@ pub fn build_microvm_for_boot(
     )?;
     crate::vmshm::attach_vmshm_regions(&mut vmm, &vm_resources.vmshm)
         .map_err(StartMicrovmError::Vmshm)?;
+    vmm.gpu_passthrough_manager = gpu_irq_init(&vmm.vm)?;
 
     #[cfg(feature = "gdb")]
     let (gdb_tx, gdb_rx) = mpsc::channel();
@@ -428,7 +428,12 @@ pub fn build_microvm_for_boot(
         vcpu.set_vmm(vmm.clone());
     }
     #[cfg(target_arch = "aarch64")]
-    gpu_mmio_init(&vmm.lock().unwrap().vm)?;
+    {
+        let vmm_guard = vmm.lock().unwrap();
+        if vmm_guard.has_gpu_passthrough() {
+            gpu_mmio_init(&vmm_guard.vm)?;
+        }
+    }
     // Move vcpus to their own threads and start their state machine in the 'Paused' state.
     vmm.lock()
         .unwrap()
@@ -951,7 +956,7 @@ fn gpu_mmio_init(vm: &Vm) -> Result<(), StartMicrovmError> {
     Ok(())
 }
 
-fn gpu_irq_init(vm: &Vm) -> Result<GpuPassthroughManager, StartMicrovmError> {
+fn gpu_irq_init(vm: &Vm) -> Result<Option<GpuPassthroughManager>, StartMicrovmError> {
     // const GPU_JOB_LINUX_IRQ:u64=77;
     // const GPU_MMU_LINUX_IRQ:u64=78;
     // const GPU_GPU_LINUX_IRQ:u64=79;
@@ -967,17 +972,33 @@ fn gpu_irq_init(vm: &Vm) -> Result<GpuPassthroughManager, StartMicrovmError> {
 
     // 1. 初始化管理器 (打开设备并创建 EventFD)
     // 使用 .map_err 将 io::Error 转换为 StartMicrovmError::GpuPassthrough
-    let gpu_mgr = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI).map_err(|e| {
-        StartMicrovmError::GpuPassthrough(format!(
-            "Failed to open GPU device {}: {}",
-            GPU_DEV_PATH, e
-        ))
-    })?;
+    let gpu_mgr = match GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI) {
+        Ok(gpu_mgr) => gpu_mgr,
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => {
+            info!("GPU device is already owned by another VM; booting this VM without GPU");
+            return Ok(None);
+        }
+        Err(e) => {
+            return Err(StartMicrovmError::GpuPassthrough(format!(
+                "Failed to open GPU device {}: {}",
+                GPU_DEV_PATH, e
+            )));
+        }
+    };
 
     // 2. 执行绑定 (配置物理驱动和 KVM irqfd)
-    gpu_mgr.attach_to_kvm(vm.fd()).map_err(|e| {
-        StartMicrovmError::GpuPassthrough(format!("Failed to setup GPU irqfd: {}", e))
-    })?;
+    if let Err(e) = gpu_mgr.attach_to_kvm(vm.fd()) {
+        if e.raw_os_error() == Some(libc::EBUSY) {
+            let _ = gpu_mgr.detach_from_kvm(vm.fd());
+            info!("GPU passthrough is already owned by another VM; booting this VM without GPU");
+            return Ok(None);
+        }
+
+        return Err(StartMicrovmError::GpuPassthrough(format!(
+            "Failed to setup GPU irqfd: {}",
+            e
+        )));
+    }
 
     // 为了确保 EventFD 在虚拟机运行期间不被 Drop (关闭)，
     // 你需要确保 gpu_mgr 的生命周期足够长。
@@ -992,7 +1013,7 @@ fn gpu_irq_init(vm: &Vm) -> Result<GpuPassthroughManager, StartMicrovmError> {
         GPU_BASE_GSI,
         GPU_BASE_GSI + 2
     );
-    Ok(gpu_mgr)
+    Ok(Some(gpu_mgr))
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1151,6 +1172,7 @@ pub fn configure_system_for_boot(
             .collect();
         let cmdline = boot_cmdline.as_cstring()?;
         let vmshm_fdt_info = vmm.vmshm_fdt_info();
+        let has_gpu_passthrough = vmm.has_gpu_passthrough();
         crate::arch::aarch64::configure_system(
             &vmm.guest_memory,
             cmdline,
@@ -1160,6 +1182,7 @@ pub fn configure_system_for_boot(
             &vmm.acpi_device_manager.vmgenid,
             initrd,
             &vmshm_fdt_info,
+            has_gpu_passthrough,
         )
         .map_err(ConfigureSystem)?;
     }
@@ -1413,7 +1436,7 @@ pub(crate) mod tests {
 
         let mmio_device_manager = MMIODeviceManager::new();
         let acpi_device_manager = ACPIDeviceManager::new();
-        let gpu_passthrough_manager = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI)?;
+        let gpu_passthrough_manager = GpuPassthroughManager::new(GPU_DEV_PATH, GPU_BASE_GSI).ok();
         #[cfg(target_arch = "x86_64")]
         let pio_device_manager = PortIODeviceManager::new(
             Arc::new(Mutex::new(BusDevice::Serial(SerialWrapper {

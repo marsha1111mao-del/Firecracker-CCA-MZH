@@ -331,7 +331,7 @@ pub struct Vmm {
     #[cfg(target_arch = "x86_64")]
     pio_device_manager: PortIODeviceManager,
     acpi_device_manager: ACPIDeviceManager,
-    gpu_passthrough_manager: GpuPassthroughManager,
+    gpu_passthrough_manager: Option<GpuPassthroughManager>,
 }
 
 impl Vmm {
@@ -341,6 +341,11 @@ impl Vmm {
             .iter()
             .map(vmshm::VmshmRegion::fdt_info)
             .collect()
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn has_gpu_passthrough(&self) -> bool {
+        self.gpu_passthrough_manager.is_some()
     }
 
     /// Gets Vmm version.
@@ -907,7 +912,9 @@ impl Drop for Vmm {
         // ready to be teared down. The line below is a no-op, because the Vmm
         // has already been stopped by the event manager at this point.
         self.stop(self.shutdown_exit_code.unwrap_or(FcExitCode::Ok));
-        self.gpu_passthrough_manager.detach_from_kvm(&self.vm.fd());
+        if let Some(gpu_passthrough_manager) = &self.gpu_passthrough_manager {
+            gpu_passthrough_manager.detach_from_kvm(&self.vm.fd());
+        }
         if let Some(observer) = self.events_observer.as_mut() {
             let res = observer.lock().set_canon_mode().inspect_err(|&err| {
                 warn!("Cannot set canonical mode for the terminal. {:?}", err);
