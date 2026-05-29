@@ -1347,6 +1347,7 @@ mod tests {
             cpu_template: Some(StaticCpuTemplate::V1N1),
             track_dirty_pages: Some(false),
             huge_pages: Some(HugePageConfig::None),
+            gpu_passthrough: Some(false),
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]
             realm_config: Some(RealmConfig::new(
                 Some("SHA256".to_string()),

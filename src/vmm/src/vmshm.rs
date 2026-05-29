@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::mem;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 
 use kvm_bindings::kvm_userspace_memory_region2;
@@ -145,6 +145,13 @@ pub enum VmshmError {
     ShortReply(usize),
     /// vmshm broker reply did not include a memfd
     MissingFd,
+    /// vmshm broker reply included {actual} fds but notify requires {expected}
+    NotifyFdCount {
+        /// Expected fd count.
+        expected: usize,
+        /// Actual fd count.
+        actual: usize,
+    },
     /// vmshm broker returned bad magic: {0:#x}
     BadMagic(u32),
     /// vmshm broker returned unsupported version: {0}
@@ -336,16 +343,15 @@ fn connect_and_map_region(config: &VmshmDeviceConfig) -> Result<VmshmRegion, Vms
         return Err(VmshmError::NameTooLong(config.name.len()));
     }
 
-    let notify = create_notify_region(config)?;
     let mut stream =
         UnixStream::connect(&config.socket_path).map_err(|source| VmshmError::Connect {
             socket_path: config.socket_path.clone(),
             source,
         })?;
     let request = build_request(config);
-    send_request(&mut stream, &request, notify.as_ref())?;
+    send_request(&mut stream, &request)?;
 
-    let (reply, file) = recv_reply_with_fd(stream.as_raw_fd())?;
+    let (reply, file, notify) = recv_reply_with_fds(stream.as_raw_fd(), config.notify.is_some())?;
     let mapped_window_size = validate_reply(config, &reply)?;
     if reply.guest_phys_addr != 0 || reply.slot != 0 {
         info!(
@@ -571,19 +577,6 @@ fn register_region(vmm: &Vmm, region: &VmshmRegion) -> Result<(), VmshmError> {
         .map_err(VmshmError::SetUserMemoryRegion)
 }
 
-fn create_notify_region(
-    config: &VmshmDeviceConfig,
-) -> Result<Option<VmshmNotifyRegion>, VmshmError> {
-    if config.notify.is_none() {
-        return Ok(None);
-    }
-
-    Ok(Some(VmshmNotifyRegion {
-        kick_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VmshmError::EventFd)?,
-        irq_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(VmshmError::EventFd)?,
-    }))
-}
-
 fn register_notify(vmm: &Vmm, region: &VmshmRegion) -> Result<(), VmshmError> {
     let Some(notify_config) = region.config.notify.as_ref() else {
         return Ok(());
@@ -605,83 +598,8 @@ fn register_notify(vmm: &Vmm, region: &VmshmRegion) -> Result<(), VmshmError> {
     Ok(())
 }
 
-fn send_request(
-    stream: &mut UnixStream,
-    request: &[u8],
-    notify: Option<&VmshmNotifyRegion>,
-) -> Result<(), VmshmError> {
-    if let Some(notify) = notify {
-        send_request_with_fds(
-            stream.as_raw_fd(),
-            request,
-            &[notify.kick_evt.as_raw_fd(), notify.irq_evt.as_raw_fd()],
-        )
-        .map_err(VmshmError::WriteRequest)
-    } else {
-        stream.write_all(request).map_err(VmshmError::WriteRequest)
-    }
-}
-
-fn send_request_with_fds(socket_fd: RawFd, request: &[u8], fds: &[RawFd]) -> io::Result<()> {
-    let mut iov = libc::iovec {
-        iov_base: request.as_ptr().cast_mut().cast(),
-        iov_len: request.len(),
-    };
-    let mut control = vec![0u8; cmsg_space_for_fds(fds.len())];
-    let msg_controllen = control.len().try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "SCM_RIGHTS control buffer is too large",
-        )
-    })?;
-    let cmsg_len = cmsg_len_for_fds(fds.len()).try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "SCM_RIGHTS control message is too large",
-        )
-    })?;
-
-    // SAFETY: Zero is a valid initialized state for `msghdr`; all used pointers are set below.
-    let mut message: libc::msghdr = unsafe { mem::zeroed() };
-    message.msg_iov = &mut iov;
-    message.msg_iovlen = 1;
-    message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = msg_controllen;
-
-    // SAFETY: `message` owns a writable control buffer large enough for the fd array.
-    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&message) };
-    if cmsg.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "failed to allocate SCM_RIGHTS control message",
-        ));
-    }
-
-    // SAFETY: `cmsg` points into `control`, which remains alive through sendmsg.
-    unsafe {
-        (*cmsg).cmsg_level = libc::SOL_SOCKET;
-        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = cmsg_len;
-        std::ptr::copy_nonoverlapping(
-            fds.as_ptr(),
-            libc::CMSG_DATA(cmsg).cast::<RawFd>(),
-            fds.len(),
-        );
-    }
-
-    // SAFETY: `message` points to valid iovec/control buffers for the duration of this call.
-    let sent = unsafe { libc::sendmsg(socket_fd, &message, 0) };
-    if sent < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if usize::try_from(sent).unwrap_or_default() != request.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::WriteZero,
-            "short sendmsg while writing vmshm request",
-        ));
-    }
-
-    Ok(())
+fn send_request(stream: &mut UnixStream, request: &[u8]) -> Result<(), VmshmError> {
+    stream.write_all(request).map_err(VmshmError::WriteRequest)
 }
 
 fn cmsg_space_for_fds(fd_count: usize) -> usize {
@@ -689,31 +607,24 @@ fn cmsg_space_for_fds(fd_count: usize) -> usize {
     unsafe { libc::CMSG_SPACE((fd_count * mem::size_of::<RawFd>()) as u32) as usize }
 }
 
-fn cmsg_len_for_fds(fd_count: usize) -> usize {
-    // SAFETY: CMSG_LEN is a pure size calculation.
-    unsafe { libc::CMSG_LEN((fd_count * mem::size_of::<RawFd>()) as u32) as usize }
-}
-
-#[repr(C)]
-union CmsgBuffer {
-    header: libc::cmsghdr,
-    bytes: [u8; 64],
-}
-
-fn recv_reply_with_fd(socket_fd: RawFd) -> Result<(VmshmHandshakeReply, File), VmshmError> {
+fn recv_reply_with_fds(
+    socket_fd: RawFd,
+    notify_requested: bool,
+) -> Result<(VmshmHandshakeReply, File, Option<VmshmNotifyRegion>), VmshmError> {
     let mut reply_bytes = [0u8; REPLY_LEN];
     let mut iov = libc::iovec {
         iov_base: reply_bytes.as_mut_ptr().cast(),
         iov_len: reply_bytes.len(),
     };
-    let mut control = CmsgBuffer { bytes: [0u8; 64] };
+    let expected_fds = if notify_requested { 3 } else { 1 };
+    let mut control = vec![0u8; cmsg_space_for_fds(expected_fds)];
     // SAFETY: Zero is a valid initialized state for `msghdr`; all used pointers are set below.
     let mut message: libc::msghdr = unsafe { mem::zeroed() };
     message.msg_iov = &mut iov;
     message.msg_iovlen = 1;
-    // SAFETY: Accessing the bytes member is safe here because we initialized the union with it.
-    message.msg_control = unsafe { control.bytes.as_mut_ptr().cast() };
-    message.msg_controllen = mem::size_of::<CmsgBuffer>()
+    message.msg_control = control.as_mut_ptr().cast();
+    message.msg_controllen = control
+        .len()
         .try_into()
         .expect("vmshm control buffer size fits msg_controllen");
 
@@ -732,12 +643,44 @@ fn recv_reply_with_fd(socket_fd: RawFd) -> Result<(VmshmHandshakeReply, File), V
     if read_len != REPLY_LEN {
         return Err(VmshmError::ShortReply(read_len));
     }
+    if message.msg_flags & libc::MSG_CTRUNC != 0 {
+        return Err(VmshmError::RecvReply(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SCM_RIGHTS control message was truncated",
+        )));
+    }
 
-    let file = extract_file_from_cmsg(&message)?;
-    Ok((VmshmHandshakeReply::from_bytes(&reply_bytes), file))
+    let mut fds = extract_fds_from_cmsg(&message)?;
+    if fds.is_empty() {
+        return Err(VmshmError::MissingFd);
+    }
+    if fds.len() < expected_fds {
+        return Err(VmshmError::NotifyFdCount {
+            expected: expected_fds,
+            actual: fds.len(),
+        });
+    }
+
+    let file = File::from(fds.remove(0));
+    let notify = if notify_requested {
+        let kick_fd = fds.remove(0).into_raw_fd();
+        let irq_fd = fds.remove(0).into_raw_fd();
+        Some(VmshmNotifyRegion {
+            // SAFETY: These fds came from SCM_RIGHTS and are uniquely owned by this process.
+            kick_evt: unsafe { EventFd::from_raw_fd(kick_fd) },
+            // SAFETY: These fds came from SCM_RIGHTS and are uniquely owned by this process.
+            irq_evt: unsafe { EventFd::from_raw_fd(irq_fd) },
+        })
+    } else {
+        None
+    };
+
+    Ok((VmshmHandshakeReply::from_bytes(&reply_bytes), file, notify))
 }
 
-fn extract_file_from_cmsg(message: &libc::msghdr) -> Result<File, VmshmError> {
+fn extract_fds_from_cmsg(message: &libc::msghdr) -> Result<Vec<OwnedFd>, VmshmError> {
+    let mut fds = Vec::new();
+
     // SAFETY: `message` was filled by recvmsg and has a valid control buffer.
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(message) };
     while !cmsg.is_null() {
@@ -753,20 +696,23 @@ fn extract_file_from_cmsg(message: &libc::msghdr) -> Result<File, VmshmError> {
             if header.cmsg_len < cmsg_header_len {
                 return Err(VmshmError::MissingFd);
             }
-            if header.cmsg_len.saturating_sub(cmsg_header_len) < raw_fd_len {
+            let data_len = header.cmsg_len.saturating_sub(cmsg_header_len);
+            if data_len < raw_fd_len {
                 return Err(VmshmError::MissingFd);
             }
             // SAFETY: This control message is SCM_RIGHTS and contains at least one fd-sized item
             // when the broker follows the vmshm protocol.
             let data = unsafe { libc::CMSG_DATA(cmsg).cast::<RawFd>() };
-            // SAFETY: We take ownership of the fd received via SCM_RIGHTS exactly once.
-            let file = unsafe { File::from_raw_fd(*data) };
-            return Ok(file);
+            let fd_count = usize::try_from(data_len / raw_fd_len).unwrap_or_default();
+            for idx in 0..fd_count {
+                // SAFETY: Each raw fd is received via SCM_RIGHTS and is owned exactly once here.
+                fds.push(unsafe { OwnedFd::from_raw_fd(*data.add(idx)) });
+            }
         }
         // SAFETY: `cmsg` and `message` are from the same recvmsg result.
         let message_ptr = std::ptr::from_ref(message).cast_mut();
         cmsg = unsafe { libc::CMSG_NXTHDR(message_ptr, cmsg) };
     }
 
-    Err(VmshmError::MissingFd)
+    Ok(fds)
 }

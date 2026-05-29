@@ -192,6 +192,9 @@ pub struct MachineConfig {
     /// Configures what page size Firecracker should use to back guest memory.
     #[serde(default)]
     pub huge_pages: HugePageConfig,
+    /// Enables the local GPU passthrough device and IRQ bridge.
+    #[serde(default)]
+    pub gpu_passthrough: bool,
     /// GDB socket address.
     #[cfg(feature = "gdb")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +240,7 @@ impl Default for MachineConfig {
             cpu_template: None,
             track_dirty_pages: false,
             huge_pages: HugePageConfig::None,
+            gpu_passthrough: false,
             #[cfg(feature = "gdb")]
             gdb_socket_path: None,
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]
@@ -272,6 +276,9 @@ pub struct MachineConfigUpdate {
     /// Configures what page size Firecracker should use to back guest memory.
     #[serde(default)]
     pub huge_pages: Option<HugePageConfig>,
+    /// Enables the local GPU passthrough device and IRQ bridge.
+    #[serde(default)]
+    pub gpu_passthrough: Option<bool>,
     /// GDB socket address.
     #[cfg(feature = "gdb")]
     #[serde(default)]
@@ -300,6 +307,7 @@ impl From<MachineConfig> for MachineConfigUpdate {
             cpu_template: cfg.static_template(),
             track_dirty_pages: Some(cfg.track_dirty_pages),
             huge_pages: Some(cfg.huge_pages),
+            gpu_passthrough: Some(cfg.gpu_passthrough),
             #[cfg(feature = "gdb")]
             gdb_socket_path: cfg.gdb_socket_path,
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]
@@ -369,6 +377,7 @@ impl MachineConfig {
             cpu_template,
             track_dirty_pages: update.track_dirty_pages.unwrap_or(self.track_dirty_pages),
             huge_pages: page_config,
+            gpu_passthrough: update.gpu_passthrough.unwrap_or(self.gpu_passthrough),
             #[cfg(feature = "gdb")]
             gdb_socket_path: update.gdb_socket_path.clone(),
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]

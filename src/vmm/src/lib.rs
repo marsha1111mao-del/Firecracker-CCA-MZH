@@ -913,7 +913,9 @@ impl Drop for Vmm {
         // has already been stopped by the event manager at this point.
         self.stop(self.shutdown_exit_code.unwrap_or(FcExitCode::Ok));
         if let Some(gpu_passthrough_manager) = &self.gpu_passthrough_manager {
-            gpu_passthrough_manager.detach_from_kvm(&self.vm.fd());
+            if let Err(err) = gpu_passthrough_manager.detach_from_kvm(&self.vm.fd()) {
+                warn!("Cannot detach GPU passthrough IRQs cleanly: {}", err);
+            }
         }
         if let Some(observer) = self.events_observer.as_mut() {
             let res = observer.lock().set_canon_mode().inspect_err(|&err| {

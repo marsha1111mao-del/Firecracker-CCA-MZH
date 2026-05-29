@@ -333,7 +333,9 @@ pub fn build_microvm_for_boot(
     )?;
     crate::vmshm::attach_vmshm_regions(&mut vmm, &vm_resources.vmshm)
         .map_err(StartMicrovmError::Vmshm)?;
-    vmm.gpu_passthrough_manager = gpu_irq_init(&vmm.vm)?;
+    if vm_resources.machine_config.gpu_passthrough {
+        vmm.gpu_passthrough_manager = gpu_irq_init(&vmm.vm)?;
+    }
 
     #[cfg(feature = "gdb")]
     let (gdb_tx, gdb_rx) = mpsc::channel();
