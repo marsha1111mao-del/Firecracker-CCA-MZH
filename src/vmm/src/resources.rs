@@ -1348,6 +1348,7 @@ mod tests {
             track_dirty_pages: Some(false),
             huge_pages: Some(HugePageConfig::None),
             gpu_passthrough: Some(false),
+            dump_fdt_path: None,
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]
             realm_config: Some(RealmConfig::new(
                 Some("SHA256".to_string()),
@@ -1480,6 +1481,7 @@ mod tests {
         vm_resources
             .update_machine_config(&MachineConfigUpdate {
                 huge_pages: Some(HugePageConfig::Hugetlbfs2M),
+                dump_fdt_path: None,
                 ..Default::default()
             })
             .unwrap();

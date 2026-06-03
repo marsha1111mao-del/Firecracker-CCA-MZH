@@ -62,6 +62,7 @@ pub fn arch_memory_regions(size: usize) -> Vec<(GuestAddress, usize)> {
 /// * `initrd` - Information about an optional initrd.
 /// * `vmshm` - Broker-backed shared memory windows to expose in the FDT.
 /// * `has_gpu_passthrough` - Whether to expose the passthrough GPU node in the FDT.
+/// * `dump_fdt_path` - Optional host path where the generated FDT should be written.
 pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
     guest_mem: &GuestMemoryMmap,
     cmdline_cstring: CString,
@@ -72,6 +73,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
     initrd: &Option<super::InitrdConfig>,
     vmshm: &[VmshmFdtInfo],
     has_gpu_passthrough: bool,
+    dump_fdt_path: Option<&str>,
 ) -> Result<(), ConfigurationError> {
     println!("create_fdt");
     let fdt = fdt::create_fdt(
@@ -84,6 +86,7 @@ pub fn configure_system<T: DeviceInfoForFDT + Clone + Debug>(
         initrd,
         vmshm,
         has_gpu_passthrough,
+        dump_fdt_path,
     )?;
     let fdt_address = GuestAddress(get_fdt_addr(guest_mem));
     guest_mem

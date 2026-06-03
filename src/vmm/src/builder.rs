@@ -1185,6 +1185,7 @@ pub fn configure_system_for_boot(
             initrd,
             &vmshm_fdt_info,
             has_gpu_passthrough,
+            machine_config.dump_fdt_path.as_deref(),
         )
         .map_err(ConfigureSystem)?;
     }

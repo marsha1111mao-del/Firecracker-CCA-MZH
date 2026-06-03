@@ -16,7 +16,7 @@ use std::ffi::CString;
 use std::fmt::Debug;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::Path;
 use vm_fdt::{Error as VmFdtError, FdtWriter, FdtWriterNode};
 use vm_memory::GuestMemoryError;
 
@@ -63,6 +63,8 @@ pub enum FdtError {
     ReadCacheInfo(String),
     /// Failure in writing FDT in memory.
     WriteFdtToMemory(#[from] GuestMemoryError),
+    /// Failure in dumping FDT to path: {0}
+    DumpFdt(std::io::Error),
 }
 
 /// Creates the flattened device tree for this aarch64 microVM.
@@ -76,6 +78,7 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     initrd: &Option<InitrdConfig>,
     vmshm: &[VmshmFdtInfo],
     has_gpu_passthrough: bool,
+    dump_fdt_path: Option<&str>,
 ) -> Result<Vec<u8>, FdtError> {
     // Allocate stuff necessary for storing the blob.
     let mut fdt_writer = FdtWriter::new()?;
@@ -114,15 +117,25 @@ pub fn create_fdt<T: DeviceInfoForFDT + Clone + Debug>(
     // Allocate another buffer so we can format and then write fdt to guest.
     let fdt_final = fdt_writer.finish()?;
 
-    let path = PathBuf::from("/root/GPU-SFTP/");
+    if let Some(path) = dump_fdt_path {
+        dump_fdt(path, &fdt_final)?;
+    }
+
+    Ok(fdt_final)
+}
+
+fn dump_fdt(path: &str, fdt: &[u8]) -> Result<(), FdtError> {
+    let path = Path::new(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(FdtError::DumpFdt)?;
+    }
     let mut output = fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .open(path.join("firecracker.dtb"))
-        .unwrap();
-    output.write_all(&fdt_final).unwrap();
-
-    Ok(fdt_final)
+        .truncate(true)
+        .open(path)
+        .map_err(FdtError::DumpFdt)?;
+    output.write_all(fdt).map_err(FdtError::DumpFdt)
 }
 
 // Following are the auxiliary function for creating the different nodes that we append to our FDT.
@@ -679,6 +692,7 @@ mod tests {
             &None,
             &[],
             false,
+            None,
         )
         .unwrap();
     }
@@ -701,6 +715,7 @@ mod tests {
             &None,
             &[],
             false,
+            None,
         )
         .unwrap();
     }
@@ -728,6 +743,7 @@ mod tests {
             &None,
             &[],
             false,
+            None,
         )
         .unwrap();
 
@@ -792,6 +808,7 @@ mod tests {
             &Some(initrd),
             &[],
             false,
+            None,
         )
         .unwrap();
 

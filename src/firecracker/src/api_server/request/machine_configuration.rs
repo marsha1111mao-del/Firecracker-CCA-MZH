@@ -123,6 +123,8 @@ mod tests {
                 cpu_template: None,
                 track_dirty_pages: Some(false),
                 huge_pages: Some(expected),
+                gpu_passthrough: Some(false),
+                dump_fdt_path: None,
                 realm_config: None,
             };
             assert_eq!(
@@ -143,6 +145,8 @@ mod tests {
             cpu_template: Some(StaticCpuTemplate::None),
             track_dirty_pages: Some(false),
             huge_pages: Some(HugePageConfig::None),
+            gpu_passthrough: Some(false),
+            dump_fdt_path: None,
             realm_config: None,
         };
         assert_eq!(
@@ -154,7 +158,8 @@ mod tests {
             "vcpu_count": 8,
             "mem_size_mib": 1024,
             "smt": false,
-            "track_dirty_pages": true
+            "track_dirty_pages": true,
+            "dump_fdt_path": "/root/GPU-SFTP/artifacts/dtb/firecracker.dtb"
         }"#;
         let expected_config = MachineConfigUpdate {
             vcpu_count: Some(8),
@@ -163,6 +168,8 @@ mod tests {
             cpu_template: None,
             track_dirty_pages: Some(true),
             huge_pages: Some(HugePageConfig::None),
+            gpu_passthrough: Some(false),
+            dump_fdt_path: Some("/root/GPU-SFTP/artifacts/dtb/firecracker.dtb".to_string()),
             realm_config: None,
         };
         assert_eq!(
@@ -187,6 +194,8 @@ mod tests {
                 cpu_template: Some(StaticCpuTemplate::T2),
                 track_dirty_pages: Some(true),
                 huge_pages: Some(HugePageConfig::None),
+                gpu_passthrough: Some(false),
+                dump_fdt_path: None,
             };
             assert_eq!(
                 vmm_action_from_request(parse_put_machine_config(&Body::new(body)).unwrap()),
@@ -212,6 +221,8 @@ mod tests {
             cpu_template: None,
             track_dirty_pages: Some(true),
             huge_pages: Some(HugePageConfig::None),
+            gpu_passthrough: Some(false),
+            dump_fdt_path: None,
             realm_config: None,
         };
         assert_eq!(
@@ -250,7 +261,8 @@ mod tests {
 
         let body = r#"{
             "vcpu_count": 8,
-            "mem_size_mib": 1024
+            "mem_size_mib": 1024,
+            "dump_fdt_path": "/tmp/firecracker-test.dtb"
         }"#;
         parse_patch_machine_config(&Body::new(body)).unwrap();
 

@@ -1063,6 +1063,13 @@ definitions:
           - None
           - 2M
         description: Which huge pages configuration (if any) should be used to back guest memory.
+      gpu_passthrough:
+        type: boolean
+        description: Enables the local GPU passthrough device and IRQ bridge.
+        default: false
+      dump_fdt_path:
+        type: string
+        description: Optional host path where the generated aarch64 FDT/DTB should be dumped.
 
   MemoryBackend:
     type: object

@@ -424,6 +424,7 @@ pub fn restore_from_snapshot(
             track_dirty_pages: Some(track_dirty_pages),
             huge_pages: Some(microvm_state.vm_info.huge_pages),
             gpu_passthrough: Some(false),
+            dump_fdt_path: None,
             #[cfg(feature = "gdb")]
             gdb_socket_path: None,
             #[cfg(all(target_arch = "aarch64", feature = "rme"))]
