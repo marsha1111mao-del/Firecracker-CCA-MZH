@@ -302,6 +302,9 @@ fn create_vmshm_nodes(fdt: &mut FdtWriter, vmshm: &[VmshmFdtInfo]) -> Result<(),
         let node = fdt.begin_node(&window.node_name)?;
         fdt.property_string("compatible", &window.compatible)?;
         fdt.property_array_u64("reg", &[window.guest_phys_addr, window.size])?;
+        if let Some(client_vmid) = window.client_vmid {
+            fdt.property_u32("vmshm-client-vmid", client_vmid)?;
+        }
         if let Some(notify) = window.notify.as_ref() {
             fdt.property_array_u64(
                 "vmshm-doorbell-reg",

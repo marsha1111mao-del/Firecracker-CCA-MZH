@@ -75,6 +75,9 @@ pub struct VmshmDeviceConfig {
     /// Optional FDT compatible string. Defaults to `vmshm`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fdt_compatible: Option<String>,
+    /// Optional client security identity exposed to guest vmshm drivers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_vmid: Option<u32>,
     /// Optional ioeventfd/irqfd notification channel for comm windows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify: Option<VmshmNotifyConfig>,

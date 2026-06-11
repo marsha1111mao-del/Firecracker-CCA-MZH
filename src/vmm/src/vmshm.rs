@@ -68,6 +68,8 @@ pub struct VmshmFdtInfo {
     pub guest_phys_addr: u64,
     /// Window size in bytes.
     pub size: u64,
+    /// Optional client security identity.
+    pub client_vmid: Option<u32>,
     /// Optional interrupt notification information.
     pub notify: Option<VmshmNotifyFdtInfo>,
 }
@@ -106,6 +108,7 @@ impl VmshmRegion {
             compatible: fdt_compatible(&self.config),
             guest_phys_addr: self.config.guest_phys_addr,
             size: self.window_size,
+            client_vmid: self.config.client_vmid,
             notify: self
                 .config
                 .notify
