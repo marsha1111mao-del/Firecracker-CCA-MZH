@@ -286,7 +286,7 @@ pub fn build_microvm_for_boot(
     #[cfg(target_arch = "aarch64")]
     if is_realm && vm_resources.machine_config.gpu_passthrough {
         return Err(GpuPassthrough(
-            "ARM CCA Realm GPU passthrough is disabled until GPU shared buffer, DMA, MMIO, and IRQ paths are adapted for Realm/GPC semantics".to_string(),
+            "ARM CCA Realm GPU passthrough is disabled until GPU shared buffer, DMA, MMIO, and IRQ paths are adapted for the local trusted-GPU Realm model".to_string(),
         ));
     }
 
