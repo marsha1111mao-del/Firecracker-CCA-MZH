@@ -283,6 +283,13 @@ pub fn build_microvm_for_boot(
         .get_cpu_template()?;
 
     let is_realm = vm_resources.machine_config.realm_config.is_some();
+    #[cfg(target_arch = "aarch64")]
+    if is_realm && vm_resources.machine_config.gpu_passthrough {
+        return Err(GpuPassthrough(
+            "ARM CCA Realm GPU passthrough is disabled until GPU shared buffer, DMA, MMIO, and IRQ paths are adapted for Realm/GPC semantics".to_string(),
+        ));
+    }
+
     let kvm = Kvm::new(cpu_template.kvm_capabilities.clone())
         .map_err(VmmError::Kvm)
         .map_err(StartMicrovmError::Internal)?;
